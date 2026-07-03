@@ -9,24 +9,28 @@ goaldl is a cross-platform Go implementation of an ALDL (Assembly Line Diagnosti
 ## Development Commands
 
 - `go build ./...` / `go vet ./...` / `go test ./...` / `go fmt ./...`
+- `go build ./...` / `go vet ./...` / `go test ./...` / `go fmt ./...`
 - `go run ./cmd/goaldl` - Show available commands
-- `go run ./cmd/goaldl ports` - List available USB serial ports
-- `go run ./cmd/goaldl record -p /dev/cu.PL2303-USBtoUART210 -t 60` - **Capture raw bytes to a file (do this first at the car)**
-- `go run ./cmd/goaldl decode aldl_capture_4800.raw -o frames.csv` - Decode a capture offline (current-generation decoder, `pkg/decoder`)
-- `go run ./cmd/goaldl decode -p /dev/cu.usbserial-10 -o live.csv` - Live real-time decode from the vehicle
+- `go run ./cmd/goaldl ports` - List available USB serial ports (name drifts; check before using -p)
+- `go run ./cmd/goaldl record -p /dev/cu.usbserial-10 -t 60` - **Capture raw bytes to a file (do this first at the car)**
+- `go run ./cmd/goaldl decode drive_4800.raw -o frames.csv` - Decode a capture offline (`pkg/decoder`)
+- `go run ./cmd/goaldl decode -p /dev/cu.usbserial-10 -o live.csv` - Live real-time decode from the vehicle (replaces the old `scan`/`log`)
 - `go run ./cmd/goaldl simulate -n 10` - Generate a synthetic capture for testing decode without hardware
-
-Legacy commands (scan, log, debug, autoscan, techedge, bitcount, ...) use older, broken decoders in `pkg/serial` — see "History" below. Do not debug or extend them; port them to `pkg/decoder` instead.
+- `go test ./pkg/decoder -run TestGolden -update` - Regenerate golden files after an intended decoder change (review the diff before committing)
 
 ## Architecture
 
-- `pkg/decoder` - **The correct decoder** (byte-value state machine) + synthetic encoder + tests. Start here.
-- `cmd/goaldl/capture.go` - record / decode / simulate commands
+The codebase was consolidated (2026-07-03) down to the working core; all experimental decoders and one-off diagnostic tools were deleted (recoverable via git history).
+
+- `pkg/decoder/` - **The decoder** (byte-value state machine) + synthetic encoder + tests. Start here.
+  - `testdata/` - real raw captures (`idle_4800.raw`, `drive_4800.raw`) as committed fixtures, plus their `.golden` frame dumps. These are the root of the test suite.
+- `cmd/goaldl/` - CLI: `main.go` (ports/ecms/test/convert) + `capture.go` (record/decode/simulate)
 - `pkg/ecm/` - ECM definitions and frame parsing (GM 1227747 per A033.ads; byte order verified against the WinALDL log)
-- `pkg/serial/serial.go` - Serial port wrapper (`go.bug.st/serial`). Also contains deprecated decoder attempts.
-- `pkg/logging/`, `pkg/autoscan/`, `pkg/aldl/` - Legacy support code for the old scan path
-- `cmd/*` (findsync, pulsehist, syncsearch, ...) - ~25 one-off diagnostic tools from past debugging; all based on the broken timing model, candidates for deletion
+- `pkg/serial/serial.go` - thin serial-port wrapper (`go.bug.st/serial`): open/read/flush/list. No decoding.
+- `pkg/aldl/aldl.go` - just the shared `Frame` type
+- `pkg/logging/`, `pkg/errors/` - CSV/JSON logging and error types
 - `data/20250601_111156_LOG.txt` - **Ground truth**: WinALDL log from the real ECM (frame layout + plausible sensor values)
+- Root `*.raw` / `*.csv` are gitignored working files; canonical fixtures live in `pkg/decoder/testdata/`.
 
 ## ALDL 160-Baud Protocol — CORRECT MODEL
 
@@ -81,6 +85,8 @@ Target idle conditions for sanity checks: ~600 RPM (raw 24), ~180°F warm coolan
 
 1. ✅ `pkg/decoder` byte-value decoder implemented, unit-tested against ground-truth frames (round trip at 2400/4800 baud, inverted polarity, pulse-width variation, noise recovery)
 2. ✅ record / decode / simulate pipeline working end to end on synthetic captures
-3. ✅ **VALIDATED ON REAL HARDWARE (2026-07-03, macOS + PL2303 at 4800 baud)**: 60s idle capture = 159.0 bytes/sec, 99.98% clean 0xFE/0x00 bytes, 47/47 frames with PROM ID 24/147 matched (2 aborts from 2 noisy bytes = 96% sync yield); live `decode -p` streams frames in real time with plausible sensors (600-650 RPM idle, closed-loop O2 oscillation, 13.6V charging). The macOS PL2303 path works fine — no new hardware needed for bench/laptop use.
-4. Remaining: replace the legacy scan/log commands with `pkg/decoder`-based equivalents; delete legacy decoders (`pkg/serial` decode functions, `pkg/aldl` sync path, `pkg/autoscan`) and the ~25 one-off cmd tools. **Recommend `git init` + initial commit before deletions — this directory is not under version control.**
-5. Optional phase 2 (onboard datalogging): MCU bridge per Hardware section below.
+3. ✅ **VALIDATED ON REAL HARDWARE (2026-07-03, macOS + PL2303 at 4800 baud)**: idle capture 159.0 bytes/sec, 99.98% clean 0xFE/0x00, 47/47 PROM match; 14-min drive capture = 635/635 PROM match across full operating range (RPM 425-3700, TPS idle→WOT, closed-loop fuel trim, multiple BLM cells). Live `decode -p` streams frames in real time. macOS PL2303 path works — no new hardware needed.
+4. ✅ **CONSOLIDATED (2026-07-03)**: repo under git; deleted 23 experimental cmd tools, 6 dead decoders, `pkg/autoscan`, legacy `pkg/aldl` sync path, and 13 legacy subcommands (7214 → ~1775 lines). Test suite rooted in the real captures: exact-stats regression + golden frame dumps in `pkg/decoder/testdata/`.
+5. **Data policy**: decoder is a faithful transport — NO plausibility filtering, outlier rejection, or smoothing in the decode path. Emit every structurally-aligned frame warts-and-all (the drive capture's one 221°F coolant spike and 3 tail 0V-battery frames are intentionally preserved). Quality signals ride alongside as fields (e.g. PROM-ID match); data-quality decisions belong to downstream consumers/visualization where they're tunable.
+6. Next: BLM-map / visualization / consumer layer (this is where sanity checks live, per #5). VSS/vehicle-speed reads 0 on this vehicle — either not wired to the ECM or was captured stationary; not a decoder issue (byte 5 is genuinely 0x00).
+7. Optional phase 2 (onboard datalogging): MCU bridge per Hardware section below.
