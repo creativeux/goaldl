@@ -35,10 +35,10 @@ type Logger struct {
 
 // LogEntry represents a JSON log entry
 type LogEntry struct {
-	Timestamp       string             `json:"timestamp"`
-	ECM             string             `json:"ecm"`
-	RawDataHex      string             `json:"raw_data_hex"`
-	ParsedValues    map[string]float64 `json:"parsed_values"`
+	Timestamp    string             `json:"timestamp"`
+	ECM          string             `json:"ecm"`
+	RawDataHex   string             `json:"raw_data_hex"`
+	ParsedValues map[string]float64 `json:"parsed_values"`
 }
 
 // New creates a new data logger with the specified format
