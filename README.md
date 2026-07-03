@@ -1,247 +1,112 @@
 # goaldl
 
-Go port of rustaldl - ALDL protocol scanner and datalogger for GM ECMs.
+A cross-platform Go scanner and datalogger for GM's 160-baud ALDL (Assembly
+Line Diagnostic Link) protocol — the pre-OBD2 diagnostic stream used by GM
+ECMs. Primary target: the **GM 1227747** (A033 TBI, '86–'88 4.3/5.0/5.7L).
 
-## About
+**Status:** working and validated on real hardware. A byte-value decoder
+reads the 160-baud stream through an ordinary USB serial adapter and produces
+correct frames — verified against a WinALDL ground-truth log and a real drive
+capture (635/635 frames with matching PROM ID across the full operating range).
 
-This is a Go port of the [rustaldl](../rustaldl) codebase. It provides cross-platform ALDL (Assembly Line Diagnostic Link) protocol communication for GM ECMs, specifically targeting the GM 1227747 ECM (A033 TBI, 86-88 4.3/5.0/5.7L engines).
+## How it works, in one paragraph
 
-**⚠️ IMPORTANT NOTE:** The original Rust codebase reads data from the serial port successfully, but produces gibberish/inaccurate values. This Go port preserves the same implementation logic with extensive inline documentation highlighting potential problem areas for debugging. See the "Debugging Notes" section below.
+The ALDL line idles high and encodes each bit as the *width* of a low pulse
+(short ≈ logic 0, long ≈ logic 1). An inverting interface cable feeds this to
+a PC UART, which frames exactly **one byte per ALDL bit** — so decoding is a
+matter of reading byte *values*, not host-side timing (which USB makes
+unreliable). At 4800 baud a short pulse arrives as `0xFE` and a long pulse as
+`0x00`; nine consecutive 1-bits are the `0x1FF` sync that delimits 20-byte
+frames. The full model and the history of getting here are in
+[`CLAUDE.md`](CLAUDE.md); the implementation is in `pkg/decoder/`.
 
-## Features
-
-- Real-time ALDL data scanning (160 baud PWM protocol)
-- Multi-format data logging (CSV, JSON, Raw, HexOnly)
-- Support for 12 sensors including:
-  - Coolant temperature, Engine RPM, Vehicle speed
-  - MAP/TPS voltages, O2 sensor, Battery voltage
-  - IAC position, Integrator, BLM, Rich/Lean counter
-- Test mode for offline hex file analysis
-- Cross-platform serial port support (macOS, Linux, Windows)
-
-## Project Structure
-
-```
-goaldl/
-├── cmd/goaldl/main.go          # CLI application
-├── pkg/
-│   ├── errors/errors.go        # Error types
-│   ├── serial/serial.go        # Serial port wrapper
-│   ├── aldl/aldl.go           # ALDL protocol
-│   ├── ecm/ecm.go             # ECM definitions
-│   └── logging/logging.go      # Data loggers
-├── data/                       # Test data files
-└── go.mod                      # Go module definition
-```
-
-## Installation
+## Install
 
 ```bash
-# Install dependencies
-go mod download
-
-# Build
-go build ./cmd/goaldl
-
-# Or run directly
-go run ./cmd/goaldl <command>
+go build ./cmd/goaldl      # build
+go run ./cmd/goaldl        # or run directly; prints available commands
 ```
 
-## Usage
+## Commands
 
-### List available serial ports
 ```bash
+# Find the adapter (the device name drifts — check before using -p)
 goaldl ports
-```
 
-### Real-time scanning (10 frames)
-```bash
-goaldl scan -p /dev/ttyUSB0
-```
+# Capture raw bytes to a file (do this first at the car), then decode offline
+goaldl record -p /dev/cu.usbserial-10 -t 60 -o drive_4800.raw
+goaldl decode drive_4800.raw -o frames.csv
 
-### Continuous logging
-```bash
-# CSV format
-goaldl log -p /dev/ttyUSB0 -o data.csv -f csv
+# Live real-time decode straight from the vehicle
+goaldl decode -p /dev/cu.usbserial-10 -o live.csv
 
-# JSON format
-goaldl log -p /dev/ttyUSB0 -o data.json -f json -c 1000
+# Generate a synthetic capture to exercise the decoder without hardware
+goaldl simulate -n 10 && goaldl decode aldl_sim_4800.raw
 
-# Raw format with detailed output
-goaldl log -p /dev/ttyUSB0 -o data.log -f raw
-```
-
-### Test with hex files
-```bash
+# Parse / convert an existing hex capture file
 goaldl test data/varied_sensors.hex
-```
+goaldl convert data/varied_sensors.hex -o output.csv
 
-### Convert hex to CSV
-```bash
-goaldl convert data/varied_sensors.hex -o output.csv -i 100
-```
-
-### List supported ECMs
-```bash
+# List supported ECMs
 goaldl ecms
 ```
 
-## ALDL Protocol Details
+The recommended workflow is **record then decode**: capture raw bytes once at
+the car, then develop and re-run the decoder offline against that file as many
+times as you like. `decode -p` is available for live monitoring.
 
-- **Baud Rate:** 160 baud (logical) using PWM encoding
-- **Sampling Rate:** 2400 baud UART (15x oversampling)
-- **Bit Encoding:** Pulse Width Modulation
-  - Logic 0: 360-370μs pulse → 0-2 '1' bits in UART byte
-  - Logic 1: 1850-1899μs pulse → 4-8 '1' bits in UART byte
-- **Frame Structure:** 9-bit characters, MSB first
-- **Frame Size:** 20 bytes (standard) or 25 bytes (extended with BLM)
+## Project layout
 
-## Debugging Notes
-
-### ⚠️ Known Issue: Gibberish Data
-
-The original Rust implementation reads data from the serial port but produces inaccurate/gibberish values. This Go port maintains the same logic with detailed comments marking potential problem areas.
-
-### Primary Suspects for Debugging
-
-The codebase includes extensive `⚠️` comments marking potential issues. Key areas to investigate:
-
-#### 1. Bit Decoding Logic (`pkg/serial/serial.go`)
-
-**Location:** `DecodeAldlBit()` function
-
-**Current Logic:**
-- 0-2 ones → ALDL bit 0
-- 3 ones → Error (ambiguous)
-- 4-8 ones → ALDL bit 1
-
-**Potential Issues:**
-- Threshold may be incorrect for actual signal characteristics
-- The "3 ones = error" case may be too strict (could be valid data)
-- Serial timing may not align with ALDL bit boundaries
-- Baud rate relationship (2400 vs 160) may need adjustment
-
-**Debug Suggestions:**
-```go
-// Add logging to see actual one-counts:
-fmt.Printf("DEBUG: ones=%d, decoded_bit=%d\n", ones, bit)
-
-// Try different thresholds:
-// - Maybe 3 ones should map to 0 or 1 instead of error
-// - Maybe threshold should be at 5 instead of 4
+```
+cmd/goaldl/            CLI: main.go (ports/ecms/test/convert) + capture.go (record/decode/simulate)
+pkg/decoder/           The decoder (byte-value state machine) + synthetic encoder + tests
+    testdata/          Real raw captures + golden frame dumps — the root of the test suite
+pkg/ecm/               ECM definitions and frame parsing (GM 1227747 per A033.ads)
+pkg/serial/            Thin serial-port wrapper (open/read/flush/list) — no decoding
+pkg/aldl/              Shared Frame type
+pkg/logging/           CSV/JSON/raw/hex loggers
+pkg/errors/            Error types
+data/                  Reference captures and A033.ads ECM definition
+docs/history/          Superseded debugging notes, kept for context
 ```
 
-#### 2. Sync Detection (`pkg/aldl/aldl.go`)
+## Testing
 
-**Location:** `WaitForSync()` function
-
-**Current Logic:**
-- Pattern-based: looks for PROM ID [24, 147]
-- Validates against expected sensor ranges
-
-**Potential Issues:**
-- May lock onto wrong data that appears valid
-- PROM ID may differ for different ECM variations
-- May sync to middle of frame instead of start
-- Force-resync strategy may cause drift
-
-**Debug Suggestions:**
-```go
-// Log what values we're actually seeing:
-fmt.Printf("DEBUG: Checking sync, bytes 0-1: [%d, %d]\n", frame[0], frame[1])
-
-// Try syncing on different patterns
-// Or disable pattern matching and sync on timing
-```
-
-#### 3. Bit Ordering (`pkg/aldl/aldl.go`)
-
-**Location:** `readAldlByte()` function
-
-**Current Logic:**
-- Reads bits MSB-first (bit 7 → bit 0)
-- Shifts each bit into position
-
-**Potential Issues:**
-- Bit ordering might actually be LSB-first
-- Bit shifting direction could be reversed
-
-**Debug Suggestions:**
-```go
-// Try LSB-first instead:
-for i := 0; i < 8; i++ {  // 0 to 7 instead of 7 to 0
-    bit, err := p.serial.ReadAldlBit()
-    if bit == 1 {
-        result |= (1 << i)
-    }
-}
-```
-
-#### 4. Continuous Resync (`pkg/aldl/aldl.go`)
-
-**Location:** `ContinuousRead()` function
-
-**Current Logic:**
-- Forces resync before reading each frame
-
-**Potential Issues:**
-- May cause unnecessary delays
-- May lose alignment if sync pattern appears in data
-- May not be necessary if protocol is well-defined
-
-**Debug Suggestions:**
-```go
-// Try reading frames without resyncing:
-// - Sync once at start
-// - Read frames continuously without calling WaitForSync()
-```
-
-### Debugging Workflow
-
-1. **Enable verbose logging** in the suspect functions
-2. **Capture raw UART bytes** before decoding
-3. **Compare with known-good captures** if available
-4. **Test with logic analyzer** to verify actual PWM timing
-5. **Try alternative thresholds/orderings** systematically
-
-### Test Data
-
-The `data/` directory contains real ALDL captures for testing:
-- `varied_sensors.hex` - 252 frames of real data
-- `A033.ads` - ECM definition file with sensor formulas
-- Test files with BLM data
-
-Use these to test changes without needing the physical hardware:
 ```bash
-goaldl test data/varied_sensors.hex
+go test ./...
 ```
 
-## Differences from Rust Version
+The suite is rooted in real captures under `pkg/decoder/testdata/`:
+`TestDecodeRealCapture` asserts exact decode stats and 100% PROM-ID match on
+the idle and drive recordings, and `TestGolden` pins the exact decoded frame
+bytes. After an intentional decoder change, regenerate the golden files with:
 
-This Go port maintains the core logic and structure but differs in:
+```bash
+go test ./pkg/decoder -run TestGolden -update   # then review the diff before committing
+```
 
-1. **Dependencies:** Uses `go.bug.st/serial` instead of `serialport` crate
-2. **Error Handling:** Go-style error handling instead of `Result<T, E>`
-3. **Concurrency:** Uses channels for `ContinuousRead()` instead of iterators
-4. **CLI:** Simplified flag parsing with standard library instead of `clap`
+## Data policy
 
-## Supported ECMs
+The decoder is a faithful transport: it does **no** plausibility filtering,
+outlier rejection, or smoothing, and emits every structurally-aligned frame
+as-is (warts included). Quality signals ride alongside the data (e.g. PROM-ID
+match); data-quality decisions belong to downstream consumers where they can be
+tuned or disabled.
 
-Currently supports:
-- **GM 1227747** - A033 TBI ECM (86-88 4.3/5.0/5.7L)
+## Hardware
 
-## Hardware Requirements
-
-- USB-to-ALDL cable/adapter
-- Compatible GM vehicle with ALDL port (typically under dashboard)
-- The adapter must support 160 baud ALDL communication
-
-## License
-
-GPL-3.0 (maintains compatibility with original rustaldl)
+- A USB-to-ALDL cable/adapter (an inverting level converter to the UART RX
+  line). Tested with a Prolific PL2303 on macOS; a genuine FTDI FT232R is a
+  good alternative (native driver on macOS). See [`CLAUDE.md`](CLAUDE.md) for
+  driver notes and an onboard-MCU option.
+- A compatible GM vehicle with an ALDL port (typically under the dash).
 
 ## References
 
-- Original Rust implementation: `../rustaldl`
+- ALDL 160-baud spec: <https://www.techedge.com.au/vehicle/aldl160/160serial.htm>
+- Decoding GM ALDL with a Teensy: <https://www.bot-thoughts.com/2018/01/decoding-gms-aldl-with-teensy-36.html>
 - A033.ads ECM definition: `data/A033.ads`
-- ALDL protocol documentation in rustaldl README
+
+## License
+
+GPL-3.0 (maintains compatibility with the original rustaldl project).
