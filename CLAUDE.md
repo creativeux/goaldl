@@ -9,19 +9,21 @@ goaldl is a cross-platform Go implementation of an ALDL (Assembly Line Diagnosti
 ## Development Commands
 
 - `go build ./...` / `go vet ./...` / `go test ./...` / `go fmt ./...`
-- `go run ./cmd/goaldl` - Show available commands
-- `go run ./cmd/goaldl ports` - List available USB serial ports (name drifts; check before using -p)
-- `go run ./cmd/goaldl record -p /dev/cu.usbserial-10 -t 60 -o session.raw` - **Capture raw bytes to a file (do this first at the car)**
-- `go run ./cmd/goaldl tui pkg/decoder/testdata/drive_4800.raw` - **Interactive dashboard** (Bubble Tea): tab between sensors / BLM grid / raw, live (`-p`) or replay
-- `go run ./cmd/goaldl monitor pkg/decoder/testdata/drive_4800.raw` - Live sensor table (sensor / raw / value), replaying a capture
-- `go run ./cmd/goaldl monitor -p /dev/cu.usbserial-10 -o session.raw -csv live.csv` - Same table live from the ECM; `-o` records raw, `-csv` logs decoded frames (this is the live datalogger — replaces the old `scan`/`log`)
-- `go run ./cmd/goaldl decode session.raw -o frames.csv` - Batch-decode a capture file to frames + CSV (offline only; use `monitor -p` for live)
-- `go run ./cmd/goaldl blm session.raw -o correction.csv` - Build the BLM fuel-trim table (rich/lean by RPM × load) from a capture
-- `go run ./cmd/goaldl monitor -p /dev/cu.usbserial-10 -blm -o session.raw` - Watch the BLM grid fill live while driving (records raw too)
-- `go run ./cmd/goaldl simulate -n 10` - Generate a synthetic capture for testing decode without hardware
+- **The bare `goaldl` command launches the interactive TUI dashboard** — it's the default face. Scripting/headless commands live under `goaldl cli <command>`.
+- `go run ./cmd/goaldl -p /dev/cu.usbserial-10` - **Dashboard**, live from the ECM (tab between sensors / BLM grid / raw)
+- `go run ./cmd/goaldl pkg/decoder/testdata/drive_4800.raw` - Dashboard, replaying a capture (`-speed N` to scrub)
+- `go run ./cmd/goaldl` (no args) - Dashboard; auto-connects if exactly one USB serial port is present
+- `go run ./cmd/goaldl help` - Usage
+- `go run ./cmd/goaldl cli ports` - List available USB serial ports (name drifts; check before using -p)
+- `go run ./cmd/goaldl cli record -p /dev/cu.usbserial-10 -t 60 -o session.raw` - **Capture raw bytes to a file (do this first at the car)**
+- `go run ./cmd/goaldl cli monitor -p /dev/cu.usbserial-10 -o session.raw -csv live.csv` - Streaming (non-interactive) sensor table; `-o` records raw, `-csv` logs decoded frames
+- `go run ./cmd/goaldl cli decode session.raw -o frames.csv` - Batch-decode a capture file to frames + CSV
+- `go run ./cmd/goaldl cli blm session.raw -o correction.csv` - Build the BLM fuel-trim table (rich/lean by RPM × load) from a capture
+- `go run ./cmd/goaldl cli monitor -p /dev/cu.usbserial-10 -blm -o session.raw` - Streaming BLM grid while driving (records raw too)
+- `go run ./cmd/goaldl cli simulate -n 10` - Generate a synthetic capture for testing decode without hardware
 - `go test ./pkg/decoder -run TestGolden -update` - Regenerate golden files after an intended decoder change (review the diff before committing)
 
-The command surface is deliberately small: **record** (capture raw), **monitor** (live/replay table, +raw record, +CSV log), **decode** (offline batch decode+export), **simulate** (test data), **ports**/**ecms** (info). `monitor` owns everything live; `decode` is file-only.
+Command model: **bare `goaldl`** = the TUI dashboard (the primary UX). **`goaldl cli`** = the scripting namespace: record (capture raw), monitor (streaming table, +raw record, +CSV log), decode (offline batch decode+export), blm (fuel-trim table), simulate (test data), ports/ecms (info).
 
 ## Architecture
 
@@ -29,9 +31,10 @@ The codebase was consolidated (2026-07-03) down to the working core; all experim
 
 - `pkg/decoder/` - **The decoder** (byte-value state machine) + synthetic encoder + tests. Start here.
   - `testdata/` - real raw captures (`idle_4800.raw`, `drive_4800.raw`) as committed fixtures, plus their `.golden` frame dumps. These are the root of the test suite.
-- `cmd/goaldl/` - CLI: `main.go` (ports/ecms) + `capture.go` (record/decode/simulate) + `monitor.go` (live table) + `csv.go` (shared `frameCSV` writer used by decode and monitor)
-- `pkg/stream/` - Provider abstraction feeding a live sensor table: `ReplayProvider` (from a capture file) and `SerialProvider` (live ECM, with optional raw recording) drive the same `Renderer`. `BuildRows` (pure) and the providers are unit-tested against the drive fixture. Pure content builders `SensorTable` and `BLMBody` produce view strings (no terminal control) shared by the `monitor` renderers and the `tui`.
-- `cmd/goaldl/tui.go` - **Interactive dashboard** (Bubble Tea): one entry point (`tui`) that tabs between the sensor table, BLM grid, and a raw frame view, driven by the same providers (live `-p` or replay). The Bubble Tea model runs the provider in a goroutine and receives frames over a channel; view rendering reuses `stream.SensorTable`/`stream.BLMBody`. Model logic (tab nav, accumulation, quit, per-view render) is unit-tested in `tui_test.go`. Stage-1 scope; recording toggle, replay-speed controls, and a live byte-stream raw view are planned next.
+- `cmd/goaldl/` - The `goaldl` binary. `main.go` dispatches: bare args → `cmdTUI` (dashboard, the default); `cli <cmd>` → `runCLI` → the scripting commands. `tui.go` (dashboard), `capture.go` (record/decode/simulate), `monitor.go` (streaming table), `blm.go`, `csv.go` (shared writer). All `cmdX` take `args []string` so `main` can route them.
+- **Core API / layering (the reusable engine multiple front-ends drive):** `pkg/stream`'s **`Session`** is the facade — `NewSession(provider, registry, ecmPart, promID)` then `Run(ctx, func(Snapshot))`. It composes provider → decode → parse into a stream of **`Snapshot`** (frame + parsed `Sensors` + `FuelTrim` + `PROMOK`), all plain serializable data with no UI. The TUI is one consumer; a future `serve` adapter (HTTP/WebSocket → web/mobile) would consume the same `Snapshot` stream. Terminal rendering (`SensorTable`, `BLMBody`, `Renderer`, `BLMView`) is presentation layered on top, not part of the core data path.
+- `pkg/stream/` - `Session`/`Snapshot` (core API) + Provider abstraction: `ReplayProvider` (capture file) and `SerialProvider` (live ECM, optional raw recording) emit `FrameEvent`s. Pure content builders `SensorTable`/`BLMBody` produce terminal-view strings shared by the `monitor` renderers and the `tui`. Providers, `Session`, `BuildRows`, and pacing are unit-tested against the drive fixture.
+- `cmd/goaldl/tui.go` - **Dashboard** (Bubble Tea), the default UX: tabs between the sensor table, BLM grid, and raw frame view, driven by a `stream.Session` (live `-p` or replay). The model runs the session in a goroutine and receives `Snapshot`s over a channel; view rendering reuses `stream.SensorTable`/`stream.BLMBody`. Model logic is unit-tested in `tui_test.go`. Planned next: recording toggle, replay pause/speed keys, live byte-stream raw view — and a `serve` adapter proving the `Session` API drives a non-terminal front-end.
 - `pkg/blm/` - BLM (Block Learn Multiplier / long-term fuel trim) accumulator: bins readings into an RPM × MAP grid and emits Samples/Average/Correction tables (matching `data/20250601_162123_BLM.txt`). The tuning metric is **Wide Average** — the mean BLM over every valid sample in a cell; target 128, >128 = lean, <128 = rich. Correction = avg/128 (multiply base VE/fuel by it). Frame→sample extraction + closed-loop/BLM-enable gating + MAP-volts→kPa live in `pkg/ecm/fueltrim.go` (`FuelTrimSample`, `MapVoltsToKPa`), shared by the `blm` command and the live view. **One assumption to verify vs WinALDL:** the MAP-volts→kPa transfer (`MapVoltsToKPa`); binning/correction don't depend on it. (The reference file's Narrow + Avg10/StdDev variants are intentionally not built — Wide Average is the metric used for tuning.)
 - Live BLM view: `monitor -blm` streams frames through `pkg/stream`'s `BLMView`, which drives the same `pkg/blm.Grid`, redraws a compact heatmap in place on a TTY (active cell reverse-highlighted, closed/open-loop status, active-cell progress `n/min`), and prints the final Average + Correction tables on exit.
 - **Confidence threshold** (`blm.DefaultMinSamples` = 4, `-min` flag on both `blm` and `monitor -blm`): BLM hunts, so a cell isn't trusted until it has enough readings (WinALDL uses ~3-4). Below the threshold a live cell renders dim (accumulating) and its correction is held at 1.000 (no change); at/above it renders solid and its correction is applied. `Grid.CorrectionAtLeast(min)` and `Grid.PopulatedCells(min)` implement this.

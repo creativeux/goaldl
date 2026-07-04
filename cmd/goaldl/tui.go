@@ -16,14 +16,14 @@ import (
 	"goaldl/pkg/stream"
 )
 
-// cmdTUI launches the interactive terminal dashboard: one entry point that
+// cmdTUI launches the interactive dashboard — the default face of goaldl. It
 // navigates between the sensor table, the BLM grid, and a raw frame view,
-// driven by either a live ECM (-p) or a replayed capture file.
+// driven by a stream.Session over either a live ECM (-p) or a replayed capture.
 //
-//	goaldl tui -p /dev/cu.usbserial-10
-//	goaldl tui drive_4800.raw [-speed 2]
-func cmdTUI() {
-	fs := flag.NewFlagSet("tui", flag.ExitOnError)
+//	goaldl -p /dev/cu.usbserial-10
+//	goaldl drive_4800.raw [-speed 2]
+func cmdTUI(args []string) {
+	fs := flag.NewFlagSet("goaldl", flag.ExitOnError)
 	portName := fs.String("p", "", "Live: serial port to read from (omit to replay a file)")
 	baudRate := fs.Int("b", 4800, "UART sampling baud rate")
 	ecmPart := fs.String("e", defaultECM, "ECM part number")
@@ -31,7 +31,7 @@ func cmdTUI() {
 	invert := fs.Bool("invert", false, "Invert byte values (non-inverting cable)")
 	minSamples := fs.Int("min", blm.DefaultMinSamples, "BLM: samples before a cell is trusted")
 	speed := fs.Float64("speed", 1.0, "Replay only: playback speed (1=real time, 0=as fast as possible)")
-	fs.Parse(os.Args[2:])
+	fs.Parse(args)
 
 	cfg := decoder.Config{BaudRate: *baudRate, FrameSize: 20, SyncBits: 9, Invert: *invert}
 	registry := ecm.NewRegistry()
@@ -41,13 +41,14 @@ func cmdTUI() {
 	}
 
 	var provider stream.Provider
-	var source string
 	if *portName != "" {
 		provider = &stream.SerialProvider{Port: *portName, Baud: *baudRate, Config: cfg}
-		source = "live " + *portName
 	} else {
 		if fs.NArg() < 1 {
-			fmt.Fprintln(os.Stderr, "Usage: goaldl tui -p <port>   |   goaldl tui <capture.raw>")
+			fmt.Fprintln(os.Stderr, "No source. Give a port or a capture file:")
+			fmt.Fprintln(os.Stderr, "  goaldl -p /dev/cu.usbserial-10")
+			fmt.Fprintln(os.Stderr, "  goaldl drive_4800.raw")
+			fmt.Fprintln(os.Stderr, "\nScripting commands live under 'goaldl cli' (try: goaldl cli ports).")
 			os.Exit(1)
 		}
 		inName := fs.Arg(0)
@@ -58,30 +59,30 @@ func cmdTUI() {
 			os.Exit(1)
 		}
 		provider = &stream.ReplayProvider{Data: data, Config: cfg, Speed: *speed}
-		source = "replay " + inName
 	}
 
-	// Run the provider in the background, delivering frames over a channel. The
-	// emit blocks on the channel, so the provider is naturally paced by the UI.
+	session := stream.NewSession(provider, registry, *ecmPart, *promID)
+
+	// Run the session in the background, delivering snapshots over a channel.
+	// The emit blocks on the channel, so the session is paced by the UI.
 	ctx, cancel := context.WithCancel(context.Background())
-	frames := make(chan stream.FrameEvent)
+	snaps := make(chan stream.Snapshot)
 	go func() {
-		provider.Run(ctx, func(ev stream.FrameEvent) {
+		session.Run(ctx, func(s stream.Snapshot) {
 			select {
-			case frames <- ev:
+			case snaps <- s:
 			case <-ctx.Done():
 			}
 		})
-		close(frames)
+		close(snaps)
 	}()
 
 	m := tuiModel{
 		registry:   registry,
 		ecmPart:    *ecmPart,
-		promID:     *promID,
 		minSamples: *minSamples,
-		source:     source,
-		frames:     frames,
+		source:     session.Name(),
+		snaps:      snaps,
 		cancel:     cancel,
 		grid:       blm.NewDefault(),
 	}
@@ -101,10 +102,10 @@ const (
 	viewRaw
 )
 
-// frameMsg carries one decoded frame into the update loop; providerDoneMsg
+// snapshotMsg carries one processed frame into the update loop; providerDoneMsg
 // signals the stream ended (replay finished or port closed).
 type (
-	frameMsg        stream.FrameEvent
+	snapshotMsg     stream.Snapshot
 	providerDoneMsg struct{}
 )
 
@@ -112,35 +113,34 @@ type tuiModel struct {
 	// config / wiring
 	registry   *ecm.Registry
 	ecmPart    string
-	promID     int
 	minSamples int
 	source     string
-	frames     <-chan stream.FrameEvent
+	snaps      <-chan stream.Snapshot
 	cancel     context.CancelFunc
 
 	// state
 	width, height int
 	active        view
-	latest        stream.FrameEvent
+	latest        stream.Snapshot
 	hasFrame      bool
 	grid          *blm.Grid
 	frameCount    int
 	done          bool
 }
 
-// waitForFrame blocks on the frame channel and delivers the next event as a
-// message. Re-issued after each frame to keep the stream flowing.
-func (m tuiModel) waitForFrame() tea.Cmd {
+// waitForSnapshot blocks on the snapshot channel and delivers the next as a
+// message. Re-issued after each snapshot to keep the stream flowing.
+func (m tuiModel) waitForSnapshot() tea.Cmd {
 	return func() tea.Msg {
-		ev, ok := <-m.frames
+		s, ok := <-m.snaps
 		if !ok {
 			return providerDoneMsg{}
 		}
-		return frameMsg(ev)
+		return snapshotMsg(s)
 	}
 }
 
-func (m tuiModel) Init() tea.Cmd { return m.waitForFrame() }
+func (m tuiModel) Init() tea.Cmd { return m.waitForSnapshot() }
 
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -164,15 +164,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.active = (m.active + 2) % 3
 		}
 
-	case frameMsg:
-		ev := stream.FrameEvent(msg)
-		m.latest = ev
+	case snapshotMsg:
+		s := stream.Snapshot(msg)
+		m.latest = s
 		m.hasFrame = true
 		m.frameCount++
-		if ft := ecm.FuelTrimSample(ev.Frame.Data); ft.Recordable() {
-			m.grid.Add(ft.RPM, ft.MapKPa, ft.BLM)
+		if s.FuelTrim.Recordable() {
+			m.grid.Add(s.FuelTrim.RPM, s.FuelTrim.MapKPa, s.FuelTrim.BLM)
 		}
-		return m, m.waitForFrame()
+		return m, m.waitForSnapshot()
 
 	case providerDoneMsg:
 		m.done = true
@@ -196,28 +196,26 @@ func (m tuiModel) View() string {
 			rendered[i] = tabInactive.Render(t)
 		}
 	}
-	right := dimStyle.Render(m.source)
-	header := lipgloss.JoinHorizontal(lipgloss.Top, rendered...) + "   " + right
+	header := lipgloss.JoinHorizontal(lipgloss.Top, rendered...) + "   " + dimStyle.Render(m.source)
 
 	var body string
 	switch {
 	case !m.hasFrame:
 		body = dimStyle.Render("\n  waiting for frames…")
 	case m.active == viewSensors:
-		body = stream.SensorTable(m.latest, m.registry, m.ecmPart)
+		body = stream.SensorTable(m.latest.FrameEvent, m.registry, m.ecmPart)
 	case m.active == viewBLM:
-		body = stream.BLMBody(m.grid, m.latest, m.minSamples)
+		body = stream.BLMBody(m.grid, m.latest.FrameEvent, m.minSamples)
 	case m.active == viewRaw:
 		body = m.rawView()
 	}
 
 	status := fmt.Sprintf("frame %d   t=%.1fs   %s",
-		m.latest.Index, m.latest.Elapsed.Seconds(), m.promMark())
+		m.latest.Index, m.latest.Elapsed.Seconds(), promMark(m.latest.PROMOK))
 	if m.done {
 		status += "   " + dimStyle.Render("(stream ended)")
 	}
-	keys := dimStyle.Render("1-3/tab switch · q quit")
-	footer := status + "   " + keys
+	footer := status + "   " + dimStyle.Render("1-3/tab switch · q quit")
 
 	return header + "\n\n" + body + "\n\n" + footer
 }
@@ -227,21 +225,16 @@ func (m tuiModel) rawView() string {
 	var hex strings.Builder
 	for i, b := range f {
 		if i > 0 && i%10 == 0 {
-			hex.WriteByte('\n')
-			hex.WriteString("           ")
+			hex.WriteString("\n           ")
 		}
 		fmt.Fprintf(&hex, " %02X", b)
 	}
 	return fmt.Sprintf("  offset %d\n  bytes:  %s\n\n  %s",
-		m.latest.Frame.ByteOffset, strings.TrimSpace(hex.String()), m.promMark())
+		m.latest.Frame.ByteOffset, strings.TrimSpace(hex.String()), promMark(m.latest.PROMOK))
 }
 
-func (m tuiModel) promMark() string {
-	f := m.latest.Frame.Data
-	if m.promID == 0 || len(f) < 3 {
-		return ""
-	}
-	if int(f[1])<<8|int(f[2]) == m.promID {
+func promMark(ok bool) string {
+	if ok {
 		return "PROM ✓"
 	}
 	return "PROM ✗"

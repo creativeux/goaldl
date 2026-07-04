@@ -31,41 +31,39 @@ go run ./cmd/goaldl        # or run directly; prints available commands
 
 ## Commands
 
+`goaldl` itself is the **interactive dashboard** — tab between sensors, the BLM
+grid, and a raw frame view, live or replaying a capture. Scripting and headless
+commands live under `goaldl cli`.
+
 ```bash
-# Interactive dashboard — tab between sensors / BLM grid / raw (live or replay)
-goaldl tui -p /dev/cu.usbserial-10
-goaldl tui drive_4800.raw            # replay a capture
+# The dashboard (default) — live from the ECM, or replaying a capture
+goaldl -p /dev/cu.usbserial-10
+goaldl drive_4800.raw               # replay (-speed N to scrub)
+goaldl                              # auto-connects if one USB serial port is present
+# keys: 1-3 / tab switch views · q quit
 
-# Find the adapter (the device name drifts — check before using -p)
-goaldl ports
+# Scripting / headless commands, under `cli`:
+goaldl cli ports                    # find the adapter (name drifts; check before -p)
 
-# Capture raw bytes to a file (do this first at the car), then decode offline
-goaldl record -p /dev/cu.usbserial-10 -t 60 -o drive_4800.raw
-goaldl decode drive_4800.raw -o frames.csv
+# Capture raw bytes at the car, then work offline
+goaldl cli record -p /dev/cu.usbserial-10 -t 60 -o drive_4800.raw
+goaldl cli decode drive_4800.raw -o frames.csv
 
-# Live sensor table straight from the vehicle — optionally record raw and log decoded CSV
-goaldl monitor -p /dev/cu.usbserial-10 -o session.raw -csv live.csv
+# Streaming (non-interactive) sensor table; optionally record raw + log CSV
+goaldl cli monitor -p /dev/cu.usbserial-10 -o session.raw -csv live.csv
+goaldl cli monitor drive_4800.raw            # replay as a streaming table
 
-# Replay a capture as a live-updating table
-goaldl monitor drive_4800.raw
+# BLM fuel-trim table (where the tune runs rich/lean)
+goaldl cli blm drive_4800.raw -o correction.csv
 
-# Build a BLM fuel-trim table (where the tune runs rich/lean) from a capture
-goaldl blm drive_4800.raw -o correction.csv
-
-# Watch the BLM grid fill live while driving (records raw at the same time)
-goaldl monitor -p /dev/cu.usbserial-10 -blm -o session.raw
-
-# Generate a synthetic capture to exercise the decoder without hardware
-goaldl simulate -n 10 && goaldl decode aldl_sim_4800.raw
-
-# List supported ECMs
-goaldl ecms
+# Synthetic capture (no hardware); list ECMs
+goaldl cli simulate -n 10 && goaldl cli decode aldl_sim_4800.raw
+goaldl cli ecms
 ```
 
-The recommended workflow is **record then decode**: capture raw bytes once at
-the car, then re-run `decode`/`monitor`/`blm` offline against that file as many
-times as you like. For live use, `monitor -p` shows the table and can record raw
-(`-o`) and log decoded CSV (`-csv`) at the same time.
+The recommended workflow is **record then work offline**: capture raw bytes once
+at the car (`goaldl cli record`), then re-run the dashboard or `cli decode`/`blm`
+against that file as many times as you like.
 
 ## BLM fuel-trim tuning
 
@@ -89,12 +87,13 @@ dim while it accumulates.
 
 ```bash
 # Offline: build the tables from a capture, write the correction grid to CSV
-goaldl blm drive_4800.raw -o correction.csv
-goaldl blm drive_4800.raw -min 3      # trust a cell at 3 samples (WinALDL-like)
+goaldl cli blm drive_4800.raw -o correction.csv
+goaldl cli blm drive_4800.raw -min 3   # trust a cell at 3 samples (WinALDL-like)
 
-# Live: watch each cell fill and settle as you drive (· = empty, dim =
-# accumulating, solid = trusted; the active cell is highlighted)
-goaldl monitor -p /dev/cu.usbserial-10 -blm -o session.raw
+# Live: watch each cell fill and settle as you drive — in the dashboard's BLM
+# tab, or the streaming grid (· = empty, dim = accumulating, solid = trusted)
+goaldl -p /dev/cu.usbserial-10                              # dashboard, press 2
+goaldl cli monitor -p /dev/cu.usbserial-10 -blm -o session.raw   # streaming grid
 ```
 
 `blm` prints three tables — Samples, Wide Average BLM, and the Correction
@@ -105,11 +104,12 @@ which column a reading lands in, not the BLM math.
 ## Project layout
 
 ```
-cmd/goaldl/            CLI: main.go (ports/ecms) + capture.go (record/decode/simulate)
-                       + monitor.go (live table + -blm grid) + blm.go + csv.go
+cmd/goaldl/            binary: main.go (dispatch: bare→dashboard, `cli`→scripting)
+                       tui.go (dashboard) + capture/monitor/blm/csv (cli commands)
 pkg/decoder/           The decoder (byte-value state machine) + synthetic encoder + tests
     testdata/          Real raw captures + golden frame dumps — the root of the test suite
-pkg/stream/            Provider abstraction (replay + serial) feeding the live sensor table + BLM grid
+pkg/stream/            Core engine: Session → Snapshot (the reusable API any front-end drives)
+                       + Provider abstraction (replay/serial) + terminal view builders
 pkg/blm/               BLM fuel-trim accumulator (RPM × MAP grid, averages, correction)
 pkg/ecm/               ECM definitions, frame parsing, and fuel-trim extraction (GM 1227747 per A033.ads)
 pkg/serial/            Thin serial-port wrapper (open/read/flush/list) — no decoding

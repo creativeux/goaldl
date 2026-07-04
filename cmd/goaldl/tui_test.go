@@ -16,7 +16,6 @@ func testModel() tuiModel {
 	return tuiModel{
 		registry:   ecm.NewRegistry(),
 		ecmPart:    "1227747",
-		promID:     6291,
 		minSamples: blm.DefaultMinSamples,
 		source:     "test",
 		cancel:     func() {},
@@ -26,12 +25,16 @@ func testModel() tuiModel {
 
 func runes(r rune) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}} }
 
-// recordableFrame is a closed-loop, block-learn-enabled frame (MWAF1=0x82),
-// PROM 24/147, RPM 1600, MAP ~40 kPa, BLM 118.
-func recordableFrame() stream.FrameEvent {
+// recordableSnapshot is a closed-loop, block-learn-enabled frame (MWAF1=0x82),
+// PROM 24/147, RPM 1600, MAP ~40 kPa, BLM 118 — as a processed Snapshot.
+func recordableSnapshot() stream.Snapshot {
 	f := make([]byte, 20)
 	f[1], f[2], f[6], f[7], f[14], f[18] = 24, 147, 99, 64, 0x82, 118
-	return stream.FrameEvent{Frame: decoder.Frame{Data: f}, Index: 0}
+	return stream.Snapshot{
+		FrameEvent: stream.FrameEvent{Frame: decoder.Frame{Data: f}, Index: 0},
+		PROMOK:     true,
+		FuelTrim:   ecm.FuelTrimSample(f),
+	}
 }
 
 func TestTUITabSwitching(t *testing.T) {
@@ -63,7 +66,7 @@ func TestTUITabSwitching(t *testing.T) {
 
 func TestTUIFrameAccumulates(t *testing.T) {
 	m := testModel()
-	next, cmd := m.Update(frameMsg(recordableFrame()))
+	next, cmd := m.Update(snapshotMsg(recordableSnapshot()))
 	mm := next.(tuiModel)
 
 	if !mm.hasFrame || mm.frameCount != 1 {
@@ -73,13 +76,14 @@ func TestTUIFrameAccumulates(t *testing.T) {
 		t.Errorf("grid recorded %d, want 1 (recordable frame)", mm.grid.TotalSamples())
 	}
 	if cmd == nil {
-		t.Error("frameMsg should re-issue waitForFrame command")
+		t.Error("a snapshot should re-issue the waitForSnapshot command")
 	}
 
 	// An open-loop frame (MWAF1=0) advances the frame count but records nothing.
-	f := recordableFrame()
+	f := recordableSnapshot()
 	f.Frame.Data[14] = 0
-	next2, _ := mm.Update(frameMsg(f))
+	f.FuelTrim = ecm.FuelTrimSample(f.Frame.Data)
+	next2, _ := mm.Update(snapshotMsg(f))
 	mm2 := next2.(tuiModel)
 	if mm2.frameCount != 2 {
 		t.Errorf("frameCount = %d, want 2", mm2.frameCount)
@@ -106,7 +110,7 @@ func TestTUIViewPerTab(t *testing.T) {
 		t.Error("view before any frame should show a waiting message")
 	}
 
-	next, _ := m.Update(frameMsg(recordableFrame()))
+	next, _ := m.Update(snapshotMsg(recordableSnapshot()))
 	mm := next.(tuiModel)
 
 	// Header always shows the tab bar and source.

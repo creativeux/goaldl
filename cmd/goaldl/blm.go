@@ -36,13 +36,13 @@ func accumulateBLM(frames []decoder.Frame) (grid *blm.Grid, openLoop, blmOff int
 // block-learn-enabled frame (BLM is frozen and meaningless otherwise) and
 // reports the "Wide Average" per cell — the mean BLM over all such samples.
 // Target is 128: above 128 the cell ran lean, below it ran rich.
-func cmdBLM() {
+func cmdBLM(args []string) {
 	fs := flag.NewFlagSet("blm", flag.ExitOnError)
 	baudRate := fs.Int("b", 4800, "UART sampling baud rate the capture was recorded at")
 	invert := fs.Bool("invert", false, "Invert byte values (non-inverting cable)")
 	minSamples := fs.Int("min", blm.DefaultMinSamples, "Samples a cell needs before its correction is trusted (below this: no change)")
 	csvOut := fs.String("o", "", "Write the correction table to this CSV file")
-	fs.Parse(os.Args[2:])
+	fs.Parse(args)
 
 	if fs.NArg() < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: goaldl blm <capture.raw> [-o correction.csv]")

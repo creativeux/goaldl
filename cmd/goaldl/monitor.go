@@ -22,7 +22,7 @@ import (
 //
 //	goaldl monitor -p /dev/cu.usbserial-10 [-o capture.raw] [-csv frames.csv]   # live
 //	goaldl monitor drive_4800.raw [-speed 2] [-csv frames.csv]                  # replay
-func cmdMonitor() {
+func cmdMonitor(args []string) {
 	fs := flag.NewFlagSet("monitor", flag.ExitOnError)
 	portName := fs.String("p", "", "Live: serial port to read from (omit to replay a file)")
 	baudRate := fs.Int("b", 4800, "UART sampling baud rate")
@@ -34,7 +34,7 @@ func cmdMonitor() {
 	blmView := fs.Bool("blm", false, "Show a live BLM fuel-trim grid instead of the sensor table")
 	minSamples := fs.Int("min", blm.DefaultMinSamples, "BLM view: samples before a cell is trusted (shown solid vs dim)")
 	speed := fs.Float64("speed", 1.0, "Replay only: playback speed (1=real time, 0=as fast as possible)")
-	fs.Parse(os.Args[2:])
+	fs.Parse(args)
 
 	cfg := decoder.Config{BaudRate: *baudRate, FrameSize: 20, SyncBits: 9, Invert: *invert}
 	registry := ecm.NewRegistry()
