@@ -16,13 +16,24 @@ type Definition struct {
 	Parameters   []Parameter
 }
 
-// Parameter represents a sensor definition
+// Lookup converts a raw byte to an engineering value through a non-linear
+// table (e.g. a thermistor curve).
+type Lookup func(raw byte) float64
+
+// Parameter describes one sensor in an ECM's data frame. Its engineering value
+// is computed from the raw bytes at Offset as either a linear transform
+// (raw*Factor + Bias) or, when Lookup is set, a table lookup — mirroring the
+// dFactor/dOffset/iLookupTableIndex fields of an A033.ads definition. The
+// conversion is data, not code: adding a sensor or changing a scale never
+// touches the parser.
 type Parameter struct {
 	Name        string
-	Offset      int
-	Size        int
+	Offset      int // byte position in the frame
+	Size        int // number of bytes (1, or 2 for a 16-bit big-endian value)
 	Unit        string
-	Formula     string
+	Factor      float64 // linear scale applied to the raw value
+	Bias        float64 // additive offset applied after Factor
+	Lookup      Lookup  // non-linear conversion; when set, Factor/Bias are ignored
 	Description string
 }
 
@@ -99,55 +110,33 @@ func (r *Registry) ParseFrame(frame *aldl.Frame, ecmPart string) (*Data, error) 
 	}, nil
 }
 
-// extractParameterValue extracts and calculates a parameter value from frame data
+// extractParameterValue reads a parameter's raw bytes from the frame and
+// converts them to an engineering value using the parameter's own Factor/Bias
+// (or Lookup). There is no per-sensor code path — the conversion lives entirely
+// in the ECM definition.
 func (r *Registry) extractParameterValue(data []byte, param *Parameter) (float64, error) {
-	if param.Offset+param.Size > len(data) {
+	if param.Offset < 0 || param.Offset+param.Size > len(data) {
 		return 0, errors.NewInvalidFrame(
 			fmt.Sprintf("parameter %s exceeds frame bounds", param.Name),
 		)
 	}
 
-	rawBytes := data[param.Offset : param.Offset+param.Size]
-
-	var rawValue float64
+	var raw float64
 	switch param.Size {
 	case 1:
-		rawValue = float64(rawBytes[0])
+		raw = float64(data[param.Offset])
 	case 2:
-		rawValue = float64(uint16(rawBytes[0])<<8 | uint16(rawBytes[1]))
+		raw = float64(uint16(data[param.Offset])<<8 | uint16(data[param.Offset+1]))
 	default:
 		return 0, errors.WrapProtocol(nil,
 			fmt.Sprintf("unsupported parameter size: %d", param.Size),
 		)
 	}
 
-	return r.applyFormula(param.Formula, rawValue, rawBytes)
-}
-
-// applyFormula applies a conversion formula to a raw sensor value
-func (r *Registry) applyFormula(formula string, value float64, bytes []byte) (float64, error) {
-	switch formula {
-	case "x":
-		return value, nil
-	case "x * 25":
-		return value * 25.0, nil
-	case "x * 4.44":
-		return value * 4.44, nil
-	case "x * 0.0196":
-		return value * 0.0196, nil
-	case "x * 0.1":
-		return value * 0.1, nil
-	case "(x[0] * 256 + x[1])":
-		if len(bytes) >= 2 {
-			combined := uint16(bytes[0])<<8 | uint16(bytes[1])
-			return float64(combined), nil
-		}
-		return 0, errors.WrapProtocol(nil, "not enough bytes for 16-bit calculation")
-	case "coolant_temp_lookup":
-		return coolantTempLookup(byte(value)), nil
-	default:
-		return 0, errors.WrapProtocol(nil, fmt.Sprintf("unknown formula: %s", formula))
+	if param.Lookup != nil {
+		return param.Lookup(byte(raw)), nil
 	}
+	return raw*param.Factor + param.Bias, nil
 }
 
 // coolantTempLookup converts raw coolant temp byte to Fahrenheit using A033.ads lookup table

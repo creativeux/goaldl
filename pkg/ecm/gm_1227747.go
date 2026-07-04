@@ -1,6 +1,10 @@
 package ecm
 
-// gm1227747 returns the ECM definition for GM 1227747 (A033 TBI ECM)
+// gm1227747 returns the ECM definition for GM 1227747 (A033 TBI ECM).
+//
+// Each parameter's conversion is expressed as data (Factor/Bias, or a Lookup),
+// per A033.ads. To add a sensor or change a scale, edit this table only — the
+// parser (extractParameterValue) is generic and never changes.
 func gm1227747() Definition {
 	return Definition{
 		PartNumber:   "1227747",
@@ -11,9 +15,8 @@ func gm1227747() Definition {
 			{
 				Name:        "prom_id",
 				Offset:      1,
-				Size:        2,
-				Unit:        "",
-				Formula:     "(x[0] * 256 + x[1])",
+				Size:        2, // 16-bit big-endian ID
+				Factor:      1,
 				Description: "PROM ID (16-bit)",
 			},
 			{
@@ -21,7 +24,7 @@ func gm1227747() Definition {
 				Offset:      3,
 				Size:        1,
 				Unit:        "steps",
-				Formula:     "x",
+				Factor:      1,
 				Description: "IAC position",
 			},
 			{
@@ -29,7 +32,7 @@ func gm1227747() Definition {
 				Offset:      4,
 				Size:        1,
 				Unit:        "°F",
-				Formula:     "coolant_temp_lookup",
+				Lookup:      coolantTempLookup,
 				Description: "Coolant temperature",
 			},
 			{
@@ -37,7 +40,7 @@ func gm1227747() Definition {
 				Offset:      5,
 				Size:        1,
 				Unit:        "MPH",
-				Formula:     "x",
+				Factor:      1,
 				Description: "Vehicle speed",
 			},
 			{
@@ -45,7 +48,7 @@ func gm1227747() Definition {
 				Offset:      6,
 				Size:        1,
 				Unit:        "V",
-				Formula:     "x * 0.0196",
+				Factor:      0.0196,
 				Description: "MAP sensor voltage",
 			},
 			{
@@ -53,7 +56,7 @@ func gm1227747() Definition {
 				Offset:      7,
 				Size:        1,
 				Unit:        "RPM",
-				Formula:     "x * 25",
+				Factor:      25,
 				Description: "Engine speed",
 			},
 			{
@@ -61,7 +64,7 @@ func gm1227747() Definition {
 				Offset:      8,
 				Size:        1,
 				Unit:        "V",
-				Formula:     "x * 0.0196",
+				Factor:      0.0196,
 				Description: "TPS voltage",
 			},
 			{
@@ -69,7 +72,7 @@ func gm1227747() Definition {
 				Offset:      9,
 				Size:        1,
 				Unit:        "counts",
-				Formula:     "x",
+				Factor:      1,
 				Description: "Integrator (short-term fuel trim)",
 			},
 			{
@@ -77,7 +80,7 @@ func gm1227747() Definition {
 				Offset:      10,
 				Size:        1,
 				Unit:        "mV",
-				Formula:     "x * 4.44",
+				Factor:      4.44,
 				Description: "O2 sensor voltage",
 			},
 			{
@@ -85,7 +88,7 @@ func gm1227747() Definition {
 				Offset:      15,
 				Size:        1,
 				Unit:        "V",
-				Formula:     "x * 0.1",
+				Factor:      0.1,
 				Description: "Battery voltage",
 			},
 			{
@@ -93,7 +96,7 @@ func gm1227747() Definition {
 				Offset:      18,
 				Size:        1,
 				Unit:        "counts",
-				Formula:     "x",
+				Factor:      1,
 				Description: "Block Learn Multiplier",
 			},
 			{
@@ -101,7 +104,7 @@ func gm1227747() Definition {
 				Offset:      19,
 				Size:        1,
 				Unit:        "transitions",
-				Formula:     "x",
+				Factor:      1,
 				Description: "Rich/Lean transition counter",
 			},
 		},
