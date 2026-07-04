@@ -198,4 +198,5 @@ Gate decision: **PROCEED to implement-feature.**
 
 ### Completion (2026-07-04)
 - **Phase 3 (Session UX) verified and closed.** Observability updated: `PROJECT_STATUS.md` marks Phase 3 shipped+verified (serve adapter next); `ROADMAP.md` Phase 3 → ✅ with the as-built line items; `CLAUDE.md` dashboard section rewritten (8 tabs, session-UX keys, provider-level controls, Phases 2+3 shipped). The editable-filename memory item is fulfilled.
-- **Next**: the `serve` adapter (HTTP/WebSocket over the same Snapshot stream) via `plan-feature`, and/or Phase 4 deferred items. Working-tree changes are uncommitted (commit when ready).
+- **Next**: the `serve` adapter (HTTP/WebSocket over the same Snapshot stream) via `plan-feature`, and/or Phase 4 deferred items.
+- 2026-07-04: Committed as `c5fa045` on `feat/winaldl-parity-phase3-session-ux`; **PR #4** opened: https://github.com/creativeux/goaldl/pull/4
