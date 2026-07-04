@@ -32,8 +32,10 @@ func mapVoltsToKPa(v float64) float64 {
 }
 
 // cmdBLM builds a BLM (fuel-trim) table from a capture, showing where the tune
-// runs rich or lean across RPM and load. Only closed-loop, block-learn-enabled
-// frames are recorded — BLM is frozen and meaningless otherwise.
+// runs rich or lean across RPM and load. It records every closed-loop,
+// block-learn-enabled frame (BLM is frozen and meaningless otherwise) and
+// reports the "Wide Average" per cell — the mean BLM over all such samples.
+// Target is 128: above 128 the cell ran lean, below it ran rich.
 func cmdBLM() {
 	fs := flag.NewFlagSet("blm", flag.ExitOnError)
 	baudRate := fs.Int("b", 4800, "UART sampling baud rate the capture was recorded at")
@@ -93,9 +95,9 @@ func cmdBLM() {
 
 	fmt.Print(grid.RenderInt("Samples", grid.Samples()))
 	fmt.Println()
-	fmt.Print(grid.RenderFloat("Average BLM (128 = neutral; <128 base tune rich, >128 lean)", grid.Average(), 1))
+	fmt.Print(grid.RenderFloat("Wide Average BLM (target 128; >128 lean, <128 rich)", grid.Average(), 1))
 	fmt.Println()
-	fmt.Print(grid.RenderFloat("Correction factor (multiply base VE/fuel by this)", correctionMasked(grid, *minSamples), 3))
+	fmt.Print(grid.RenderFloat("Correction factor = avg/128 (multiply base VE/fuel by this)", correctionMasked(grid, *minSamples), 3))
 
 	if *csvOut != "" {
 		if err := writeCorrectionCSV(*csvOut, grid, *minSamples); err != nil {
