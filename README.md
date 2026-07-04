@@ -43,6 +43,12 @@ goaldl monitor -p /dev/cu.usbserial-10 -o session.raw -csv live.csv
 # Replay a capture as a live-updating table
 goaldl monitor drive_4800.raw
 
+# Build a BLM fuel-trim table (where the tune runs rich/lean) from a capture
+goaldl blm drive_4800.raw -o correction.csv
+
+# Watch the BLM grid fill live while driving (records raw at the same time)
+goaldl monitor -p /dev/cu.usbserial-10 -blm -o session.raw
+
 # Generate a synthetic capture to exercise the decoder without hardware
 goaldl simulate -n 10 && goaldl decode aldl_sim_4800.raw
 
@@ -51,19 +57,55 @@ goaldl ecms
 ```
 
 The recommended workflow is **record then decode**: capture raw bytes once at
-the car, then re-run `decode`/`monitor` offline against that file as many times
-as you like. For live use, `monitor -p` shows the table and can record raw
+the car, then re-run `decode`/`monitor`/`blm` offline against that file as many
+times as you like. For live use, `monitor -p` shows the table and can record raw
 (`-o`) and log decoded CSV (`-csv`) at the same time.
+
+## BLM fuel-trim tuning
+
+The `blm` command turns a drive capture into a fuel-trim map — a picture of
+where the base tune runs rich or lean across RPM and load. It reads the Block
+Learn Multiplier (BLM, the ECM's long-term fuel trim) from each frame and bins
+it into an RPM × MAP grid.
+
+**Reading BLM: 128 is neutral.** Below 128 the ECM is *removing* fuel because
+the mixture ran rich (the base tune has too much fuel there); above 128 it is
+*adding* fuel because it ran lean. The **correction factor** each cell reports
+is `avg_BLM / 128` — multiply that cell's base VE/fuel by it to move the ECM
+back toward 128.
+
+Only closed-loop, block-learn-enabled frames are recorded — BLM is frozen and
+meaningless at wide-open throttle, on decel, or before warm-up, so those frames
+are skipped. A cell also isn't trusted until it has collected enough readings
+(default 4; BLM hunts, so one or two samples are noisy). Below that threshold a
+cell's correction is held at `1.000` (no change) and, in the live view, drawn
+dim while it accumulates.
+
+```bash
+# Offline: build the tables from a capture, write the correction grid to CSV
+goaldl blm drive_4800.raw -o correction.csv
+goaldl blm drive_4800.raw -min 3      # trust a cell at 3 samples (WinALDL-like)
+
+# Live: watch each cell fill and settle as you drive (· = empty, dim =
+# accumulating, solid = trusted; the active cell is highlighted)
+goaldl monitor -p /dev/cu.usbserial-10 -blm -o session.raw
+```
+
+`blm` prints three tables — Samples, Wide Average BLM, and the Correction
+factor — matching the format of `data/20250601_162123_BLM.txt`. The MAP→kPa
+axis uses a standard GM 1-bar transfer (`pkg/ecm/fueltrim.go`); it only affects
+which column a reading lands in, not the BLM math.
 
 ## Project layout
 
 ```
 cmd/goaldl/            CLI: main.go (ports/ecms) + capture.go (record/decode/simulate)
-                       + monitor.go (live table) + csv.go (shared CSV writer)
+                       + monitor.go (live table + -blm grid) + blm.go + csv.go
 pkg/decoder/           The decoder (byte-value state machine) + synthetic encoder + tests
     testdata/          Real raw captures + golden frame dumps — the root of the test suite
-pkg/stream/            Provider abstraction (replay + serial) feeding the live sensor table
-pkg/ecm/               ECM definitions and frame parsing (GM 1227747 per A033.ads)
+pkg/stream/            Provider abstraction (replay + serial) feeding the live sensor table + BLM grid
+pkg/blm/               BLM fuel-trim accumulator (RPM × MAP grid, averages, correction)
+pkg/ecm/               ECM definitions, frame parsing, and fuel-trim extraction (GM 1227747 per A033.ads)
 pkg/serial/            Thin serial-port wrapper (open/read/flush/list) — no decoding
 pkg/aldl/              Shared Frame type
 pkg/errors/            Error types
