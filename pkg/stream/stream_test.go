@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -23,8 +24,12 @@ func driveCapture(t *testing.T) []byte {
 	return raw
 }
 
-// TestReplayProviderEmitsAllFrames: with pacing off, the replay provider must
-// emit exactly the frames the decoder finds, in order.
+// TestReplayProviderEmitsAllFrames verifies the replay provider (the code under
+// test) relays every frame from the decoder, in order and unmodified. The
+// provider's contract is "decode the bytes, emit each frame", so the decoder's
+// output is the oracle here (the decoder itself is independently validated in
+// pkg/decoder against real captures). This catches the provider dropping,
+// reordering, or corrupting frames — none of which the decoder can cause.
 func TestReplayProviderEmitsAllFrames(t *testing.T) {
 	data := driveCapture(t)
 	cfg := decoder.DefaultConfig()
@@ -42,6 +47,9 @@ func TestReplayProviderEmitsAllFrames(t *testing.T) {
 	for i, ev := range got {
 		if ev.Index != i {
 			t.Errorf("event %d has Index %d", i, ev.Index)
+		}
+		if !bytes.Equal(ev.Frame.Data, wantFrames[i].Data) {
+			t.Errorf("frame %d relayed wrong bytes:\n got % X\nwant % X", i, ev.Frame.Data, wantFrames[i].Data)
 		}
 		if int(ev.Frame.Data[1])<<8|int(ev.Frame.Data[2]) != 6291 {
 			t.Errorf("frame %d PROM ID mismatch: % X", i, ev.Frame.Data[:3])

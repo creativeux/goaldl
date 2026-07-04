@@ -94,10 +94,12 @@ func TestCorrectionAtLeast(t *testing.T) {
 	if got := corr[idx(g.RPM, 2000)][idx(g.MAP, 50)]; got != 1.0 {
 		t.Errorf("below-threshold cell correction = %v, want 1.0 (held)", got)
 	}
-	// A lower threshold trusts cell B and applies its correction (100/128).
+	// A lower threshold trusts cell B and applies its correction. Expected
+	// value is the independently-computed literal 100/128 = 0.78125, not the
+	// production formula re-run, so a broken divisor would be caught.
 	corr3 := g.CorrectionAtLeast(2)
-	if got := corr3[idx(g.RPM, 2000)][idx(g.MAP, 50)]; math.Abs(got-100.0/128.0) > 1e-9 {
-		t.Errorf("cell B at min=2 correction = %.5f, want %.5f", got, 100.0/128.0)
+	if got := corr3[idx(g.RPM, 2000)][idx(g.MAP, 50)]; math.Abs(got-0.78125) > 1e-9 {
+		t.Errorf("cell B at min=2 correction = %.5f, want 0.78125", got)
 	}
 }
 
