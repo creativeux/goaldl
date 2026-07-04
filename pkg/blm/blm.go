@@ -30,6 +30,14 @@ var (
 	DefaultMAP = axis(20, 100, 10)
 )
 
+// SparkRPM and SparkMAP are WinALDL's spark-counts display axes: RPM 400..3600
+// in 400 steps, MAP 30..100 kPa in 5 steps — a narrower RPM band with finer MAP
+// resolution than the fuel-trim grids, to localize knock.
+var (
+	SparkRPM = axis(400, 3600, 400)
+	SparkMAP = axis(30, 100, 5)
+)
+
 func axis(lo, hi, step float64) []float64 {
 	var a []float64
 	for v := lo; v <= hi+1e-9; v += step {
@@ -63,6 +71,9 @@ func New(rpmLabels, mapLabels []float64) *Grid {
 
 // NewDefault builds a grid on the standard WinALDL display axes.
 func NewDefault() *Grid { return New(DefaultRPM, DefaultMAP) }
+
+// NewSpark builds a grid on the WinALDL spark-counts display axes.
+func NewSpark() *Grid { return New(SparkRPM, SparkMAP) }
 
 // nearest returns the index of the label closest to v (ties go to the lower
 // index). Values beyond the ends clamp to the first/last bucket.
@@ -113,6 +124,13 @@ func (g *Grid) Samples() [][]int {
 // Latest returns the most recent BLM in each cell (0 where no data).
 func (g *Grid) Latest() [][]float64 {
 	return g.floatGrid(func(cl cell) float64 { return cl.latest })
+}
+
+// Sum returns the total of all readings binned into each cell (0 where no
+// data). For a grid fed per-frame deltas (e.g. knock-counter increments) this
+// is the cell's event count, where Average would give the mean delta.
+func (g *Grid) Sum() [][]float64 {
+	return g.floatGrid(func(cl cell) float64 { return cl.sum })
 }
 
 // Average returns the mean BLM in each cell (0 where no data).

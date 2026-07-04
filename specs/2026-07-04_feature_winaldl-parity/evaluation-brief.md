@@ -1,93 +1,95 @@
 <!-- SDA: v1.0 -->
-# Evaluation Brief: WinALDL Parity — Phase 2 (Tune)
+# Evaluation Brief: WinALDL Parity — Phase 3 (Session UX)
 
-You are verifying **Phase 2** of the WinALDL-parity feature for `goaldl` (a Go ALDL scanner/datalogger for the GM 1227747 ECM). Phase 1 already shipped; only the Phase 2 changes below are under evaluation. Evaluate against what was agreed, not against WinALDL feature-completeness.
+You are verifying **Phase 3** of the WinALDL-parity feature for `goaldl` (a Go ALDL scanner/datalogger for the GM 1227747 ECM). Scope: **uncommitted working-tree changes vs `HEAD`** implementing `specs/2026-07-04_feature_winaldl-parity/spec-phase3.md`. Phases 1 (Diagnose) and 2 (Tune) are already merged in `HEAD` and are not under evaluation — only regressions against them are. Evaluate against what was agreed, not against WinALDL feature-completeness.
 
 ---
 
 ## Section A: What Was Requested
 
-Phase 2 ("Tune") turns the TUI dashboard into a live tuning instrument. Scope (plan.md Phase 2, steps 2.1–2.4) with user decisions:
+Phase 3 of the WinALDL-parity plan (`plan.md` steps 3.1–3.4) plus one deferred user request:
 
-- **2.1 INT grid tab** — integrator (short-term fuel trim) as an RPM×MAP Wide-Average grid, **closed-loop gated** (distinct from BLM's closed-loop **and** block-learn-enabled gate).
-- **2.2 O2 grid tab** — oxygen-sensor voltage grid, **ungated** (populates on every parsed frame).
-- **2.3 In-TUI Save/Clear** — `s` saves **all three grids** (BLM+INT+O2) to timestamped files; `c` clears the **current** grid (or resets extrema on the sensor tab).
-- **2.4 Sensor Min/Max** — **always-on MIN and MAX columns** on the sensor tab (not a mode toggle); `c` resets them.
-- **Decision 4 (added mid-spec):** a **persistent loop-state line** on every tab (Open/Closed loop + per-grid recording indicators), because loop state governs whether the BLM/INT grids are accumulating at all.
+- **3.1 Recording toggle (`r`)** — the TUI, on a live source, can start/stop writing the raw byte capture to a file mid-session (previously only pre-declared via `record`/`monitor -o`).
+- **3.2 Replay pause/speed keys** — `space` pauses/resumes a replay; `+`/`=`/`-` change playback speed at runtime.
+- **3.3 Spark-counts grid** — a new grid tab counting knock events (deltas of the cumulative KNOCK_CNT byte, frame offset 17) binned by RPM×MAP.
+- **3.4 CSV logging toggle (`d`)** — the TUI can start/stop a decoded-frame CSV log mid-session (previously only `monitor -csv`).
+- **Deferred user request** — file-producing actions must prompt for an editable filename (default `goaldl_<ts>`) instead of auto-naming silently.
 
-**Tab order decision:** grids grouped — `1 Sensors · 2 BLM · 3 INT · 4 O2 · 5 Flags · 6 Codes · 7 Raw` (keys 1–7).
+User decisions (2026-07-04, binding):
+1. Filename prompt on **all three** actions: `s` (save grids), `r` (record start), `d` (CSV start). Enter accepts, Esc cancels.
+2. Spark grid uses **WinALDL's spark axes**: RPM 400–3600 step 400 × MAP 30–100 step 5 (not the trim-grid axes).
+3. **Spark is tab 5**, grouped with the grids: `1 Sensors · 2 BLM · 3 INT · 4 O2 · 5 Spark · 6 Flags · 7 Codes · 8 Raw`.
 
-**Architecture constraint (hard):** Phase 2 must be **presentation + consumer-side accumulation only** — **no changes** to `stream.Snapshot`, `stream.Session`, `pkg/blm`, or `pkg/ecm`, and the **decode path must be untouched** (decoder golden files byte-identical). INT/O2 grids and extrema are accumulated in the TUI model from the existing `Snapshot` stream (`Sensors` + `FuelTrim`).
+Post-implementation user feedback (also in scope): no-op key warnings (e.g. `r` during replay) must **self-expire after ~3 seconds** instead of persisting in the footer; newer notices must never be wiped by a stale expiry timer.
 
-Full requirements: `specs/2026-07-04_feature_winaldl-parity/requirements.md` (deltas D4, D6, D7, D9, D16). Full spec: `specs/2026-07-04_feature_winaldl-parity/spec-phase2.md`.
+Full requirements context: `specs/2026-07-04_feature_winaldl-parity/requirements.md` (deltas D8, D10; success criteria 1–4). The full spec is `specs/2026-07-04_feature_winaldl-parity/spec-phase3.md` — **read it**; it is the agreed contract.
 
----
+## Section B: Acceptance Criteria
 
-## Section B: What Was Agreed To (acceptance criteria)
-
-1. **INT grid** accumulates the integrator binned by RPM×MAP, only when **closed loop**; open-loop frames do not add to it. Renders a heatmap with active-cell highlight and status line.
-2. **O2 grid** accumulates O2 volts (`Sensors["oxygen_sensor"]/1000`) on **every parseable frame** (ungated). Grid cells render to **2 decimals** (legibility — a 3-decimal cell fills the whole column and collides); the current-reading status line and the **saved** O2 file keep **3 decimals**.
-3. **Save (`s`)** from any tab writes three files `goaldl_<YYYYMMDD_HHMMSS>_{BLM,INT,O2}.txt`: BLM & INT contain Samples + Wide Average + **Correction** (avg/128); O2 contains Samples + Wide Average and **no correction table**.
-4. **Clear (`c`)** clears only the active grid (BLM/INT/O2 independently); on the sensor tab it resets Min/Max extrema; on Flags/Codes/Raw it is a no-op.
-5. **Sensor tab** shows a 6-column table `SENSOR·RAW·VALUE·MIN·MAX·ALT`; MIN/MAX track per-sensor extrema in the primary unit and reset on `c`.
-6. **Persistent loop line** appears on **every** tab: badge `CLOSED LOOP` (green) / `OPEN LOOP` (amber) / `LOOP —` (dim before first good frame), plus `BLM ●/○ INT ●/○ O2 ●/○` recording dots reflecting each grid's gate. It is derived from the last **parseable** frame (holds across a following bad frame, no flicker).
-7. **Tabs** reorder to Sensors·BLM·INT·O2·Flags·Codes·Raw; keys 1–7 select; tab/arrows cycle all 7.
-8. **No regression:** `monitor` sensor table stays 4-column; `monitor -blm` and the `blm` command are unchanged (still record 469 closed-loop samples over the drive fixture). `stream.Snapshot`/`Session`/`pkg/blm`/`pkg/ecm` unchanged. Decoder goldens byte-identical.
-
-Out of scope (do NOT flag as missing): spark-counts grid, recording/CSV toggles, replay pause/speed keys, Dash view, config persistence, multi-ECM, Narrow/Avg10/StdDev grid modes; INT/O2 in the `monitor` command (dashboard-only this phase).
-
----
+1. **Recording toggle (live)**: with a live source, `r` opens a filename prompt (default `goaldl_<ts>`, `.raw` appended); confirming attaches the capture and the footer shows a red `● REC <name> <bytes>` segment; a second `r` stops, closes the file, and shows a byte-count notice. On a **replay** source `r` is a no-op with an explanatory notice and no prompt.
+2. **Recording is fail-soft**: a write error on the capture target (disk full etc.) detaches the recording and surfaces a notice — the live session and its frame stream must survive. The provider-facing `Write` never returns an error.
+3. **CSV toggle**: `d` prompts (`.csv`), then writes the same format as `decode`/`monitor -csv` (`time_sec,byte_offset,prom_ok` + one column per parameter) with **one row per ParseOK frame only** (bad frames skipped — monitor parity); stopping shows a row count. Works on live and replay.
+4. **Replay pause/speed**: `space` toggles pause (footer shows `⏸ PAUSED`; no frames flow while paused; resume continues from the same data position with no catch-up rush). `+`/`=`/`-` double/halve speed clamped to 0.25×–16× (footer shows `N×` when ≠1×). A speed change applies **from the current position only** (never retroactive). On a live source, or a replay launched with `-speed 0`, these keys are no-ops with explanatory notices. `FrameEvent.Elapsed` stays on the data timeline regardless.
+5. **Spark grid**: tab 5 of 8 (keys 1–8, tab/arrows cycle all 8); axes RPM 400–3600/400 × MAP 30–100/5; bins the **mod-256 delta** of the parsed `knock_count` per ParseOK frame (first frame is baseline only; wrap 250→4 reads +10; delta 0 adds nothing); cells display the grid's **Sum** (total knocks), never dimmed; `c` on the spark tab clears the grid but **keeps the knock baseline** (no phantom delta on the next frame).
+6. **Filename prompt**: opened by `s`/`r`(start)/`d`(start), pre-filled `goaldl_<ts>`; while open, printable keys — including digits and `q` — type into the buffer (no tab switch, no quit; only ctrl+c quits), backspace edits, Esc cancels with no file written, Enter with an empty buffer cancels. Files are created exclusively (`O_CREATE|O_EXCL` semantics): a name collision keeps the prompt open with a hint and never overwrites.
+7. **Save writes four files**: `<base>_BLM.txt` / `_INT.txt` / `_O2.txt` (Phase 2 formats unchanged: BLM/INT have Samples + Wide Average + Correction; O2 has 3-decimal averages and **no** correction) plus `<base>_SPARK.txt` (Samples (frames with knock) + Knock counts, **no** correction).
+8. **Loop line gains SPARK**: the persistent loop-status line shows a fifth recording dot `SPARK` with the same ungated condition as O2 (● whenever a good frame exists).
+9. **Notice expiry**: the no-op warnings from criteria 1 and 4 self-clear after ~3 s; a stale expiry timer must not clear a newer notice (e.g. a save confirmation issued after the warning).
+10. **No regression / architecture invariants**: `pkg/stream/session.go` (`Snapshot`/`Session`), `pkg/ecm`, and `pkg/decoder` are **untouched**; decoder goldens byte-identical (`TestGolden` passes without `-update`); the `blm` command still records **469** closed-loop samples over the drive fixture; `monitor` and `monitor -blm` render unchanged (`BLMBody`/`SensorTable` signatures preserved); no new module dependencies (`go.mod` unchanged).
 
 ## Section C: What Changed
 
-New files:
-- `pkg/stream/gridviews.go` — `gridHeat` (shared heatmap renderer), `INTBody`, `O2Body`, `LoopBadge`, `LoopStatus`.
-- `pkg/stream/gridviews_test.go` — tests for the above.
-- `specs/.../spec-phase2.md` — the spec (reference).
+Working-tree changes vs `HEAD` (uncommitted; ~1124 insertions / 92 deletions):
 
-Modified:
-- `pkg/stream/blmview.go` — `BLMBody` refactored to delegate to `gridHeat` (behavior intended identical; still used by `monitor -blm`).
-- `pkg/stream/table.go` — `Row` gained `Min`/`Max`; added `BuildRowsExtrema`, `renderTableExtrema`, `SensorTableExtrema` (nil extrema → 4-column `SensorTable`).
-- `cmd/goaldl/tui.go` — view enum regrouped + keys 1–7; model fields `intGrid/o2Grid/mins/maxs/hasExtrema/notice`; `accumulate`, `save`, `clear`, `saveGrids`, `writeTrimGridFile`, `writeO2File`, `loopStatusLine`; INT/O2/extrema wired into `View`.
-- `cmd/goaldl/tui_test.go` — new tests + existing tab/view tests updated for 7 tabs.
+| File | Status | Summary |
+|---|---|---|
+| `pkg/blm/blm.go` | M | `Grid.Sum()` accessor; `SparkRPM`/`SparkMAP`/`NewSpark()` |
+| `pkg/blm/blm_test.go` | M | tests for both |
+| `pkg/stream/record.go` | **new** | `RecordSink` — mutex-guarded switchable raw-capture tee (fail-soft) |
+| `pkg/stream/record_test.go` | **new** | discard/count/swap/error-detach/concurrent(-race) tests |
+| `pkg/stream/replay.go` | M | runtime `SetPaused`/`Paused`/`SetSpeed`/`CurrentSpeed`; re-anchored pacing, ≤100 ms wait slices; `Speed==0` inert |
+| `pkg/stream/stream_test.go` | M | pause/resume, non-retroactive speed change, unpaced-inert tests (injectable clock) |
+| `pkg/stream/gridviews.go` | M | `gridHeat` takes a values matrix; `SparkBody`; `LoopStatus` SPARK dot |
+| `pkg/stream/blmview.go` | M | `BLMBody` passes `Average()` to `gridHeat` (behavior identical) |
+| `pkg/stream/gridviews_test.go` | M | `TestSparkBody`; LoopStatus cases extended |
+| `cmd/goaldl/tui.go` | M | 8 tabs; spark accumulation; filename prompt; `saveGrids(dir, base, …4 grids)`; `r`/`d` toggles; replay keys; footer chrome; notice expiry (`setNotice`/`warn`/`noticeExpireMsg`) |
+| `cmd/goaldl/tui_test.go` | M | prompt/spark/record/CSV/replay-keys/notice-expiry tests; 8-tab updates; end-to-end extended |
 
-Review the diff with: `git diff HEAD -- pkg cmd` and read the new files directly. The branch point is the current `HEAD` (Phase 2 is uncommitted working-tree changes).
-
----
+Docs (not under code evaluation): `specs/…/spec-phase3.md`, `tasks.md`, `README.md`, `product-knowledge/PROJECT_STATUS.md`.
 
 ## Section D: How to Verify
 
-- **Build/vet:** `go build ./...` · `go vet ./...`
-- **Format:** `gofmt -l pkg cmd` (must print nothing)
-- **Full test suite (race):** `go test -race ./...`
-- **Decoder goldens untouched:** `go test ./pkg/decoder -run TestGolden -count=1` (must pass with **no** `-update`)
-- **Non-regression sanity (optional, over the committed fixture):**
-  - `go run ./cmd/goaldl blm pkg/decoder/testdata/drive_4800.raw` → expect `Recorded 469 into BLM cells`.
-  - `go run ./cmd/goaldl monitor pkg/decoder/testdata/drive_4800.raw -blm -speed 0` → BLM grid renders.
-- **End-to-end dashboard test:** `go test ./cmd/goaldl -run TestTUIDriveFixtureEndToEnd -v` drives all 635 drive-fixture frames through a real `Session` into the model (BLM==469 cross-check, INT>BLM, O2≥INT, all 7 tabs render).
-- The interactive TUI needs a real terminal (Bubble Tea alt-screen) — the model logic is exercised headlessly by the tests above; you are not expected to drive the live TUI. No browser tools apply.
+From the repo root (`/Users/aaronstone/Development/aldl/goaldl`):
 
----
+```
+go build ./...
+go vet ./...
+gofmt -l pkg cmd            # must print nothing
+go test -race -count=1 ./...
+go test ./pkg/decoder -run TestGolden -count=1        # goldens byte-identical, NO -update
+go run ./cmd/goaldl blm pkg/decoder/testdata/drive_4800.raw          # expect "Recorded 469"
+go run ./cmd/goaldl monitor pkg/decoder/testdata/drive_4800.raw -blm -speed 0   # grid renders, exit 0
+go test ./cmd/goaldl -run 'TestTUI|TestSaveGrids' -v                 # the TUI model behavior suite
+git status --short && git diff --stat HEAD                          # confirm which files changed
+git diff HEAD -- pkg/stream/session.go pkg/ecm pkg/decoder go.mod   # must be EMPTY (forbidden seam)
+```
+
+The TUI itself is interactive (no headless driver); behavior is verified through the Bubble Tea model tests in `cmd/goaldl/tui_test.go` — read them critically rather than assuming coverage. The committed real capture `pkg/decoder/testdata/drive_4800.raw` is the ground-truth fixture.
 
 ## Section E: Standards to Enforce
 
-Read each and check the diff against it:
-- `product-knowledge/standards/decoder/byte-value-decoding.md` (must) — decode path.
-- `product-knowledge/standards/decoder/raw-data-policy.md` (must) — no plausibility filtering in the transport; gating is a consumer/view decision; PROM/parse are quality signals, not drop-filters.
-- `product-knowledge/standards/architecture/session-api-layering.md` (must) — front-ends consume `stream.Session`/`Snapshot`; frame-layout knowledge stays in `pkg/ecm`; `pkg/blm` stays a generic grid; presentation layered on top.
-- `product-knowledge/standards/testing/golden-fixtures.md` (should) — tests rooted in real captures; goldens only regenerate on an intended decoder change.
-- `product-knowledge/standards/go/tooling.md` (should) — gofmt/vet/build/test-race is the whole gate; minimal deps.
-- Philosophies (core, blocking): `product-knowledge/philosophies/consolidate-over-accrete.md`, `product-knowledge/philosophies/ground-truth-first.md`.
+Read each from `product-knowledge/standards/`:
+- `decoder/byte-value-decoding.md` (must) — decode path must be untouched.
+- `decoder/raw-data-policy.md` (must) — no plausibility filtering in decode/emit; gating only at consumers.
+- `architecture/session-api-layering.md` (must) — front-ends consume Session/Snapshot; frame-layout knowledge stays in `pkg/ecm`; `pkg/blm` stays generic.
+- `testing/golden-fixtures.md` (should) — tests rooted in real captures; goldens regenerated only deliberately.
+- `go/tooling.md` (should) — gofmt/vet/build/test -race gate; minimal dependencies.
 
----
+Core philosophies (blocking if violated), from `product-knowledge/philosophies/`: `consolidate-over-accrete.md`, `ground-truth-first.md`.
 
 ## Section F: Personas to Consult
 
-Adopt each and critique Phase 2:
-- `product-knowledge/personas/product-manager.md` — user value, scope, testable acceptance.
-- `product-knowledge/personas/architect.md` — layering, no new deps, consistency, tech debt.
-- `product-knowledge/personas/qa.md` — edge cases, gating correctness, regression, coverage.
-
----
-
-Write your evaluation to `specs/2026-07-04_feature_winaldl-parity/evaluation.md` per the required format. Be skeptical — your job is to find problems, not confirm success. Pay particular attention to: (a) the INT-vs-BLM gating distinction being actually correct in code, (b) whether any of the four forbidden packages (`Snapshot`/`Session`/`pkg/blm`/`pkg/ecm`) were in fact modified, and (c) whether `accumulate` can bin spurious zeros from an unparsed frame.
+Read each from `product-knowledge/personas/` and review from that perspective:
+- `product-manager.md` — scope matches the agreed Phase 3 cut + the three user decisions; no creep; user value at the car.
+- `architect.md` — layering (controls on providers below the Session facade), no new deps, `blm` generality, consolidation vs forking.
+- `qa.md` — edge cases (knock wrap/reset, empty grids, prompt collisions, sink write errors, pause during CSV, quit with open files), test coverage vs the spec's §8 test plan, regression safety.

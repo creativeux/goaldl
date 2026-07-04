@@ -2,11 +2,12 @@ package main
 
 import (
 	"errors"
+	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -26,6 +27,7 @@ func testModel() tuiModel {
 		grid:       blm.NewDefault(),
 		intGrid:    blm.NewDefault(),
 		o2Grid:     blm.NewDefault(),
+		sparkGrid:  blm.NewSpark(),
 		mins:       map[string]float64{},
 		maxs:       map[string]float64{},
 	}
@@ -128,14 +130,16 @@ func TestTUITabSwitching(t *testing.T) {
 		{runes('2'), viewBLM},
 		{runes('3'), viewINT},
 		{runes('4'), viewO2},
-		{runes('5'), viewFlags},
-		{runes('6'), viewCodes},
-		{runes('7'), viewRaw},
+		{runes('5'), viewSpark},
+		{runes('6'), viewFlags},
+		{runes('7'), viewCodes},
+		{runes('8'), viewRaw},
 		{runes('1'), viewSensors},
-		{tea.KeyMsg{Type: tea.KeyTab}, viewBLM},      // cycle forward
-		{tea.KeyMsg{Type: tea.KeyTab}, viewINT},      //
-		{tea.KeyMsg{Type: tea.KeyTab}, viewO2},       //
-		{tea.KeyMsg{Type: tea.KeyShiftTab}, viewINT}, // cycle back
+		{tea.KeyMsg{Type: tea.KeyTab}, viewBLM},     // cycle forward
+		{tea.KeyMsg{Type: tea.KeyTab}, viewINT},     //
+		{tea.KeyMsg{Type: tea.KeyTab}, viewO2},      //
+		{tea.KeyMsg{Type: tea.KeyTab}, viewSpark},   //
+		{tea.KeyMsg{Type: tea.KeyShiftTab}, viewO2}, // cycle back
 		{runes('1'), viewSensors},
 		{tea.KeyMsg{Type: tea.KeyShiftTab}, viewRaw}, // wraps backward
 	}
@@ -241,7 +245,7 @@ func TestTUIViewPerTab(t *testing.T) {
 
 	// Header always shows the tab bar and source; footer the heartbeat counts.
 	v := mm.View()
-	for _, want := range []string{"Sensors", "BLM", "INT", "O2", "Flags", "Codes", "Raw", "test", "PROM ✓", "1 ok / 0 bad"} {
+	for _, want := range []string{"Sensors", "BLM", "INT", "O2", "Spark", "Flags", "Codes", "Raw", "test", "PROM ✓", "1 ok / 0 bad"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("sensors view missing %q", want)
 		}
@@ -267,6 +271,30 @@ func TestTUIViewPerTab(t *testing.T) {
 	mm.active = viewBLM
 	if !strings.Contains(mm.View(), "RPM\\MAP") {
 		t.Error("BLM view should render the grid")
+	}
+
+	mm.active = viewSpark
+	sv := mm.View()
+	for _, want := range []string{"KNOCK_CNT", "knock events"} {
+		if !strings.Contains(sv, want) {
+			t.Errorf("spark view missing %q", want)
+		}
+	}
+
+	// Every grid tab carries its "what this table means" explainer.
+	for _, tc := range []struct {
+		v      view
+		marker string
+	}{
+		{viewBLM, "Block Learn Multiplier"},
+		{viewINT, "Integrator"},
+		{viewO2, "stoichiometric"},
+		{viewSpark, "detonation"},
+	} {
+		mm.active = tc.v
+		if !strings.Contains(mm.View(), tc.marker) {
+			t.Errorf("tab %d missing its explainer (want %q)", tc.v, tc.marker)
+		}
 	}
 
 	mm.active = viewFlags
@@ -359,21 +387,17 @@ func TestTUIClearIsolation(t *testing.T) {
 	}
 }
 
-// TestSaveGrids: writes three files; BLM/INT carry a correction table, O2 does
-// not (it is a voltage).
+// TestSaveGrids: writes four files under the caller-chosen base; BLM/INT carry
+// a correction table, O2 and SPARK do not (voltage / counts).
 func TestSaveGrids(t *testing.T) {
 	m := testModel()
 	next, _ := m.Update(snapshotMsg(recordableSnapshot()))
 	mm := next.(tuiModel)
 
 	dir := t.TempDir()
-	ts := time.Date(2026, 7, 4, 14, 30, 22, 0, time.UTC)
-	base, err := saveGrids(dir, ts, mm.grid, mm.intGrid, mm.o2Grid, mm.minSamples)
-	if err != nil {
+	const base = "session42"
+	if err := saveGrids(dir, base, mm.grid, mm.intGrid, mm.o2Grid, mm.sparkGrid, mm.minSamples); err != nil {
 		t.Fatalf("saveGrids: %v", err)
-	}
-	if base != "goaldl_20260704_143022" {
-		t.Errorf("base = %q, want goaldl_20260704_143022", base)
 	}
 
 	read := func(suffix string) string {
@@ -396,13 +420,388 @@ func TestSaveGrids(t *testing.T) {
 	if strings.Contains(o2, "Correction") {
 		t.Errorf("O2 file should have no correction table:\n%s", o2)
 	}
+	spark := read("SPARK")
+	if !strings.Contains(spark, "Samples (frames with knock)") || !strings.Contains(spark, "Knock counts") {
+		t.Errorf("SPARK file missing Samples/Knock counts:\n%s", spark)
+	}
+	if strings.Contains(spark, "Correction") {
+		t.Errorf("SPARK file should have no correction table:\n%s", spark)
+	}
+
+	// A second save to the same base must refuse (exclusive create), not
+	// overwrite.
+	if err := saveGrids(dir, base, mm.grid, mm.intGrid, mm.o2Grid, mm.sparkGrid, mm.minSamples); !errors.Is(err, fs.ErrExist) {
+		t.Errorf("second save err = %v, want fs.ErrExist", err)
+	}
+}
+
+// TestTUISparkDeltaAccumulation: the spark grid bins per-frame deltas of the
+// cumulative knock counter — first frame is baseline only, unchanged counters
+// add nothing, and a wrap (250→4) reads as +10, never a huge negative.
+func TestTUISparkDeltaAccumulation(t *testing.T) {
+	knockSnap := func(knock byte) stream.Snapshot {
+		s := recordableSnapshot()
+		s.Frame.Data[17] = knock
+		s.Sensors, _ = testModel().def.Parse(s.Frame.Data)
+		return s
+	}
+	sparkTotal := func(g *blm.Grid) float64 {
+		var n float64
+		for _, row := range g.Sum() {
+			for _, v := range row {
+				n += v
+			}
+		}
+		return n
+	}
+
+	var cur tea.Model = testModel()
+	for _, k := range []byte{10, 12, 12} { // baseline, +2, +0
+		cur, _ = cur.Update(snapshotMsg(knockSnap(k)))
+	}
+	mm := cur.(tuiModel)
+	if got := sparkTotal(mm.sparkGrid); got != 2 {
+		t.Errorf("spark total = %v, want 2 (baseline + delta 2 + delta 0)", got)
+	}
+	if got := mm.sparkGrid.TotalSamples(); got != 1 {
+		t.Errorf("spark samples = %d, want 1 (one frame with knock)", got)
+	}
+
+	// Counter wrap: 250 → 4 is a delta of 10 (mod 256).
+	var cur2 tea.Model = testModel()
+	for _, k := range []byte{250, 4} {
+		cur2, _ = cur2.Update(snapshotMsg(knockSnap(k)))
+	}
+	if got := sparkTotal(cur2.(tuiModel).sparkGrid); got != 10 {
+		t.Errorf("wrapped spark total = %v, want 10", got)
+	}
+
+	// Clear keeps the knock baseline: the next unchanged counter adds nothing.
+	mm.active = viewSpark
+	next, _ := mm.Update(runes('c'))
+	mm2 := next.(tuiModel)
+	if got := sparkTotal(mm2.sparkGrid); got != 0 {
+		t.Errorf("cleared spark total = %v, want 0", got)
+	}
+	next2, _ := mm2.Update(snapshotMsg(knockSnap(12)))
+	if got := sparkTotal(next2.(tuiModel).sparkGrid); got != 0 {
+		t.Errorf("post-clear unchanged counter added %v, want 0 (baseline kept)", got)
+	}
+}
+
+// TestTUIPromptEditing: while the prompt is open, digits and q type into the
+// buffer (no tab switch, no quit); esc cancels without writing; enter writes
+// the four grid files under the edited base; an existing file keeps the
+// prompt open instead of overwriting.
+func TestTUIPromptEditing(t *testing.T) {
+	dir := t.TempDir()
+	m := testModel()
+	next, _ := m.Update(snapshotMsg(recordableSnapshot()))
+	mm := next.(tuiModel)
+
+	// `s` opens the save prompt pre-filled with the timestamped default.
+	next2, _ := mm.Update(runes('s'))
+	mm2 := next2.(tuiModel)
+	if mm2.prompt == nil || mm2.prompt.target != promptSave {
+		t.Fatal("s should open the save prompt")
+	}
+	if !strings.HasPrefix(mm2.prompt.buf, "goaldl_") {
+		t.Errorf("prompt default = %q, want goaldl_<ts>", mm2.prompt.buf)
+	}
+	if !strings.Contains(mm2.View(), "save as:") {
+		t.Error("view should render the open prompt")
+	}
+
+	// Keys route to the buffer: digits don't switch tabs, q doesn't quit.
+	before := mm2.active
+	var cur tea.Model = mm2
+	for _, r := range "2q" {
+		var cmd tea.Cmd
+		cur, cmd = cur.Update(runes(r))
+		if cmd != nil {
+			t.Fatalf("typing %q returned a command (quit?)", r)
+		}
+	}
+	mm3 := cur.(tuiModel)
+	if mm3.active != before {
+		t.Error("digit typed into the prompt switched tabs")
+	}
+	if !strings.HasSuffix(mm3.prompt.buf, "2q") {
+		t.Errorf("buffer = %q, want …2q appended", mm3.prompt.buf)
+	}
+
+	// Esc cancels without writing anything.
+	next4, _ := mm3.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	mm4 := next4.(tuiModel)
+	if mm4.prompt != nil {
+		t.Fatal("esc should close the prompt")
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
+		t.Errorf("esc wrote %d files, want 0", len(ents))
+	}
+
+	// Re-open, replace the buffer with a temp-dir base, confirm: 4 files.
+	next5, _ := mm4.Update(runes('s'))
+	mm5 := next5.(tuiModel)
+	mm5.prompt.buf = filepath.Join(dir, "mysession")
+	next6, _ := mm5.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm6 := next6.(tuiModel)
+	if mm6.prompt != nil {
+		t.Fatalf("enter should close the prompt (hint %q)", mm6.prompt.hint)
+	}
+	if !strings.Contains(mm6.notice, "mysession") {
+		t.Errorf("notice = %q, want the saved base", mm6.notice)
+	}
+	for _, s := range []string{"BLM", "INT", "O2", "SPARK"} {
+		if _, err := os.Stat(filepath.Join(dir, "mysession_"+s+".txt")); err != nil {
+			t.Errorf("missing %s file: %v", s, err)
+		}
+	}
+
+	// Confirming the same base again collides: prompt stays open with a hint.
+	next7, _ := mm6.Update(runes('s'))
+	mm7 := next7.(tuiModel)
+	mm7.prompt.buf = filepath.Join(dir, "mysession")
+	next8, _ := mm7.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm8 := next8.(tuiModel)
+	if mm8.prompt == nil {
+		t.Fatal("collision should keep the prompt open")
+	}
+	if mm8.prompt.hint == "" {
+		t.Error("collision should set the prompt hint")
+	}
+}
+
+// TestTUINoticeExpiry: a no-op warning (e.g. `r` during replay) arms a timer
+// and clears itself when it fires; a stale timer never wipes a newer notice.
+func TestTUINoticeExpiry(t *testing.T) {
+	m := testModel() // replay-style model: no RecordSink
+	next, cmd := m.Update(runes('r'))
+	mm := next.(tuiModel)
+	if !strings.Contains(mm.notice, "live source") {
+		t.Fatalf("notice = %q, want live-source warning", mm.notice)
+	}
+	if cmd == nil {
+		t.Fatal("warning should arm an expiry timer")
+	}
+	seq := mm.noticeSeq
+
+	// The armed timer fires → the warning clears.
+	next2, _ := mm.Update(noticeExpireMsg(seq))
+	if got := next2.(tuiModel).notice; got != "" {
+		t.Errorf("notice after expiry = %q, want cleared", got)
+	}
+
+	// A newer notice must survive the old warning's stale timer.
+	mm.active = viewBLM
+	next3, _ := mm.Update(runes('c')) // persistent "cleared BLM grid"
+	mm3 := next3.(tuiModel)
+	next4, _ := mm3.Update(noticeExpireMsg(seq)) // stale seq
+	if got := next4.(tuiModel).notice; !strings.Contains(got, "cleared BLM") {
+		t.Errorf("stale expiry wiped a newer notice: %q", got)
+	}
+}
+
+// TestTUIRecordingToggle: `r` is a notice-only no-op on replay (no RecordSink);
+// with a live sink it prompts, records through the sink, and stops with a
+// byte-count notice.
+func TestTUIRecordingToggle(t *testing.T) {
+	// Replay source: no sink.
+	m := testModel()
+	next, _ := m.Update(runes('r'))
+	mm := next.(tuiModel)
+	if mm.prompt != nil {
+		t.Fatal("r on replay must not open a prompt")
+	}
+	if !strings.Contains(mm.notice, "live source") {
+		t.Errorf("notice = %q, want live-source explanation", mm.notice)
+	}
+
+	// Live source: sink present.
+	dir := t.TempDir()
+	live := testModel()
+	live.recSink = &stream.RecordSink{}
+	next2, _ := live.Update(runes('r'))
+	mm2 := next2.(tuiModel)
+	if mm2.prompt == nil || mm2.prompt.target != promptRecord {
+		t.Fatal("r with a sink should open the record prompt")
+	}
+	mm2.prompt.buf = filepath.Join(dir, "capture")
+	next3, _ := mm2.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm3 := next3.(tuiModel)
+	if mm3.recFile == nil || !mm3.recSink.Active() {
+		t.Fatal("confirm should attach the recording target")
+	}
+	if !strings.Contains(mm3.notice, "recording → ") {
+		t.Errorf("notice = %q, want recording start", mm3.notice)
+	}
+	// The provider's writes flow through the sink into the file.
+	mm3.recSink.Write([]byte{0xFE, 0x00, 0xFE})
+
+	next4, _ := mm3.Update(runes('r'))
+	mm4 := next4.(tuiModel)
+	if mm4.recFile != nil || mm4.recSink.Active() {
+		t.Fatal("second r should stop the recording")
+	}
+	if !strings.Contains(mm4.notice, "stopped recording") || !strings.Contains(mm4.notice, "3 B") {
+		t.Errorf("notice = %q, want stopped + 3 B", mm4.notice)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "capture.raw"))
+	if err != nil || len(b) != 3 {
+		t.Errorf("capture.raw = %d bytes (%v), want 3", len(b), err)
+	}
+}
+
+// TestTUICSVToggle: `d` starts a CSV log that writes one row per ParseOK frame
+// (bad frames skipped — monitor parity) and stops with a row-count notice.
+func TestTUICSVToggle(t *testing.T) {
+	dir := t.TempDir()
+	m := testModel()
+	next, _ := m.Update(runes('d'))
+	mm := next.(tuiModel)
+	if mm.prompt == nil || mm.prompt.target != promptCSV {
+		t.Fatal("d should open the csv prompt")
+	}
+	mm.prompt.buf = filepath.Join(dir, "log")
+	next2, _ := mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm2 := next2.(tuiModel)
+	if mm2.csvLog == nil {
+		t.Fatal("confirm should open the csv log")
+	}
+
+	var cur tea.Model = mm2
+	cur, _ = cur.Update(snapshotMsg(recordableSnapshot()))
+	bad := stream.Snapshot{
+		FrameEvent: stream.FrameEvent{Frame: decoder.Frame{Data: []byte{0xDE, 0xAD}}, Index: 1},
+		ParseOK:    false,
+	}
+	cur, _ = cur.Update(snapshotMsg(bad))
+	cur, _ = cur.Update(snapshotMsg(recordableSnapshot()))
+	mm3 := cur.(tuiModel)
+	if mm3.csvLog.Rows != 2 {
+		t.Errorf("csv rows = %d, want 2 (ParseOK frames only)", mm3.csvLog.Rows)
+	}
+
+	next4, _ := mm3.Update(runes('d'))
+	mm4 := next4.(tuiModel)
+	if mm4.csvLog != nil {
+		t.Fatal("second d should stop the log")
+	}
+	if !strings.Contains(mm4.notice, "2 rows") {
+		t.Errorf("notice = %q, want 2 rows", mm4.notice)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "log.csv"))
+	if err != nil {
+		t.Fatalf("read log.csv: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	if len(lines) != 3 { // header + 2 rows
+		t.Errorf("csv has %d lines, want 3 (header + 2 rows)", len(lines))
+	}
+	if !strings.HasPrefix(lines[0], "time_sec,byte_offset,prom_ok") {
+		t.Errorf("csv header = %q", lines[0])
+	}
+}
+
+// TestTUICloseOutputs: quitting with an active recording and CSV log detaches
+// the sink before closing the file (so the provider goroutine cannot write to
+// a closed handle) and closes both outputs.
+func TestTUICloseOutputs(t *testing.T) {
+	dir := t.TempDir()
+	m := testModel()
+	m.recSink = &stream.RecordSink{}
+
+	f, err := os.Create(filepath.Join(dir, "quit.raw"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.recSink.Set(f)
+	m.recFile, m.recName = f, "quit.raw"
+	c, err := newFrameCSV(filepath.Join(dir, "quit.csv"), m.def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.csvLog = c
+
+	m.closeOutputs()
+
+	if m.recSink.Active() {
+		t.Error("closeOutputs should detach the sink before closing the file")
+	}
+	// Both handles are closed: further writes/closes must fail.
+	if _, err := f.Write([]byte{0}); err == nil {
+		t.Error("recording file still writable after closeOutputs")
+	}
+	if err := c.Close(); err == nil {
+		t.Error("csv file still open after closeOutputs")
+	}
+	// A provider write after quit is safely discarded, not a panic/write-to-closed.
+	if n, err := m.recSink.Write([]byte{0xFE}); n != 1 || err != nil {
+		t.Errorf("post-quit sink write = (%d, %v), want discarded (1, nil)", n, err)
+	}
+}
+
+// TestTUIReplayKeys: space/+/- act on the replay provider (clamped), and are
+// notice-only no-ops on a live source or an unpaced (-speed 0) replay.
+func TestTUIReplayKeys(t *testing.T) {
+	// Live source: no replay handle.
+	m := testModel()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	if !strings.Contains(next.(tuiModel).notice, "replay-only") {
+		t.Errorf("live space notice = %q, want replay-only", next.(tuiModel).notice)
+	}
+
+	// Unpaced replay: controls inert.
+	un := testModel()
+	un.replay = &stream.ReplayProvider{Speed: 0}
+	next2, _ := un.Update(runes('+'))
+	if !strings.Contains(next2.(tuiModel).notice, "unpaced") {
+		t.Errorf("unpaced + notice = %q, want unpaced explanation", next2.(tuiModel).notice)
+	}
+
+	// Paced replay: pause toggles, speed doubles/halves with clamping.
+	r := testModel()
+	r.replay = &stream.ReplayProvider{Speed: 1.0}
+	var cur tea.Model = r
+	cur, _ = cur.Update(tea.KeyMsg{Type: tea.KeySpace})
+	if !r.replay.Paused() {
+		t.Error("space should pause the replay")
+	}
+	if !strings.Contains(cur.(tuiModel).View(), "PAUSED") {
+		t.Error("footer should show the paused badge")
+	}
+	cur, _ = cur.Update(tea.KeyMsg{Type: tea.KeySpace})
+	if r.replay.Paused() {
+		t.Error("space again should resume")
+	}
+	cur, _ = cur.Update(runes('+'))
+	if got := r.replay.CurrentSpeed(); got != 2 {
+		t.Errorf("speed after + = %v, want 2", got)
+	}
+	if mm := cur.(tuiModel); !strings.Contains(mm.View(), "2×") {
+		t.Error("footer should show the 2× speed")
+	}
+	for range 10 {
+		cur, _ = cur.Update(runes('+'))
+	}
+	if got := r.replay.CurrentSpeed(); got != 16 {
+		t.Errorf("speed clamps at %v, want 16", got)
+	}
+	for range 20 {
+		cur, _ = cur.Update(runes('-'))
+	}
+	if got := r.replay.CurrentSpeed(); got != 0.25 {
+		t.Errorf("speed clamps at %v, want 0.25", got)
+	}
+	_ = cur
 }
 
 // TestTUIDriveFixtureEndToEnd drives the full real drive capture through a
 // Session into the dashboard model, exercising the accumulation path over every
 // frame. The BLM count must match the `blm` command's 469 (shared gating),
-// INT (closed-loop only) must exceed it, O2 (ungated) must exceed INT, and all
-// seven tabs must render without panic.
+// INT (closed-loop only) must exceed it, O2 (ungated) must exceed INT, the
+// spark total must match an independent recomputation of the knock-counter
+// deltas, and every tab must render without panic.
 func TestTUIDriveFixtureEndToEnd(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "pkg", "decoder", "testdata", "drive_4800.raw"))
 	if err != nil {
@@ -412,13 +811,36 @@ func TestTUIDriveFixtureEndToEnd(t *testing.T) {
 	provider := &stream.ReplayProvider{Data: raw, Config: decoder.DefaultConfig(), Speed: 0}
 	session := stream.NewSession(provider, registry, "1227747", 6291)
 
+	// Independent spark oracle: sum the mod-256 deltas of the parsed
+	// knock_count across ParseOK frames, first frame as baseline.
+	var wantSpark float64
+	var prevKnock float64
+	haveBase := false
+
 	var cur tea.Model = testModel()
 	if err := session.Run(t.Context(), func(s stream.Snapshot) {
+		if s.ParseOK {
+			k := s.Sensors["knock_count"]
+			if haveBase {
+				wantSpark += math.Mod(k-prevKnock+256, 256)
+			}
+			prevKnock, haveBase = k, true
+		}
 		cur, _ = cur.Update(snapshotMsg(s))
 	}); err != nil {
 		t.Fatalf("session run: %v", err)
 	}
 	mm := cur.(tuiModel)
+
+	var gotSpark float64
+	for _, row := range mm.sparkGrid.Sum() {
+		for _, v := range row {
+			gotSpark += v
+		}
+	}
+	if gotSpark != wantSpark {
+		t.Errorf("spark total = %v, want %v (independent delta recomputation)", gotSpark, wantSpark)
+	}
 
 	if mm.grid.TotalSamples() != 469 {
 		t.Errorf("BLM grid = %d, want 469 (matches the blm command)", mm.grid.TotalSamples())

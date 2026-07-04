@@ -106,6 +106,127 @@ func TestReplayProviderPacing(t *testing.T) {
 	}
 }
 
+// TestReplayProviderPauseResume: pausing freezes playback (wall clock burns in
+// pause slices, no frames emitted), resuming continues from the same data
+// position with no catch-up rush — total wall time is the paced time plus
+// exactly the paused time.
+func TestReplayProviderPauseResume(t *testing.T) {
+	data := driveCapture(t)
+	cfg := decoder.DefaultConfig()
+	frames := decoder.New(cfg).Decode(data)
+	lastData := time.Duration(float64(frames[len(frames)-1].ByteOffset) / 160.0 * float64(time.Second))
+
+	var vclock time.Duration
+	base := time.Unix(0, 0)
+	var p *ReplayProvider
+	var pauseSlices int
+	p = &ReplayProvider{
+		Data: data, Config: cfg, Speed: 1.0,
+		now: func() time.Time { return base.Add(vclock) },
+		sleep: func(_ context.Context, d time.Duration) error {
+			vclock += d
+			if p.Paused() {
+				pauseSlices++
+				if pauseSlices == 5 {
+					p.SetPaused(false)
+				}
+			}
+			return nil
+		},
+	}
+
+	var emitted int
+	err := p.Run(context.Background(), func(ev FrameEvent) {
+		emitted++
+		if ev.Index == 3 {
+			p.SetPaused(true)
+		}
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if emitted != len(frames) {
+		t.Fatalf("emitted %d frames, want %d", emitted, len(frames))
+	}
+	if pauseSlices != 5 {
+		t.Fatalf("pause slept %d slices, want 5", pauseSlices)
+	}
+	want := lastData + 5*controlSlice
+	if diff := vclock - want; diff < -time.Millisecond || diff > time.Millisecond {
+		t.Errorf("wall clock = %v, want ~%v (paced + paused time)", vclock, want)
+	}
+}
+
+// TestReplayProviderSpeedChange: SetSpeed applies from the current position
+// only — frames before the change pace at the old rate, frames after at the
+// new one, with no retroactive jump.
+func TestReplayProviderSpeedChange(t *testing.T) {
+	data := driveCapture(t)
+	cfg := decoder.DefaultConfig()
+	frames := decoder.New(cfg).Decode(data)
+	dataTime := func(i int) time.Duration {
+		return time.Duration(float64(frames[i].ByteOffset) / 160.0 * float64(time.Second))
+	}
+	const changeAt = 100
+
+	var vclock time.Duration
+	base := time.Unix(0, 0)
+	p := &ReplayProvider{
+		Data: data, Config: cfg, Speed: 1.0,
+		now:   func() time.Time { return base.Add(vclock) },
+		sleep: func(_ context.Context, d time.Duration) error { vclock += d; return nil },
+	}
+
+	var wallAtChange time.Duration
+	err := p.Run(context.Background(), func(ev FrameEvent) {
+		if ev.Index == changeAt {
+			wallAtChange = vclock
+			p.SetSpeed(2.0)
+		}
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := p.CurrentSpeed(); got != 2.0 {
+		t.Errorf("CurrentSpeed = %v, want 2.0", got)
+	}
+	// Up to the change: real time. After: half time. No retroactive jump.
+	if diff := wallAtChange - dataTime(changeAt); diff < -time.Millisecond || diff > time.Millisecond {
+		t.Errorf("wall at change = %v, want ~%v (old speed until the change)", wallAtChange, dataTime(changeAt))
+	}
+	want := dataTime(changeAt) + (dataTime(len(frames)-1)-dataTime(changeAt))/2
+	if diff := vclock - want; diff < -time.Millisecond || diff > time.Millisecond {
+		t.Errorf("total wall = %v, want ~%v (2x only after the change)", vclock, want)
+	}
+}
+
+// TestReplayProviderUnpacedControlsInert: with Speed 0 the provider never
+// sleeps and runtime controls change nothing.
+func TestReplayProviderUnpacedControlsInert(t *testing.T) {
+	data := driveCapture(t)
+	p := &ReplayProvider{
+		Data: data, Config: decoder.DefaultConfig(), Speed: 0,
+		sleep: func(context.Context, time.Duration) error {
+			t.Error("unpaced replay slept")
+			return nil
+		},
+	}
+	var emitted int
+	err := p.Run(context.Background(), func(ev FrameEvent) {
+		if ev.Index == 0 {
+			p.SetPaused(true) // must not stall an unpaced run
+			p.SetSpeed(4.0)
+		}
+		emitted++
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if emitted == 0 {
+		t.Fatal("no frames emitted")
+	}
+}
+
 // TestReplayProviderCancel: a cancelled context stops the stream promptly.
 func TestReplayProviderCancel(t *testing.T) {
 	data := driveCapture(t)

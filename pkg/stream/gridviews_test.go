@@ -28,17 +28,18 @@ func TestLoopStatus(t *testing.T) {
 		badge     string
 		blm, intg string // "BLM ●" etc.
 		o2        string
+		spark     string // ungated like O2: ● whenever a frame parses
 		suffix    string
 	}{
-		{"closed+enabled", ecm.FuelTrim{ClosedLoop: true, BLMEnabled: true}, true, "CLOSED LOOP", "BLM ●", "INT ●", "O2 ●", ""},
-		{"closed+disabled", ecm.FuelTrim{ClosedLoop: true, BLMEnabled: false}, true, "CLOSED LOOP", "BLM ○", "INT ●", "O2 ●", "(BLM disabled)"},
-		{"open", ecm.FuelTrim{ClosedLoop: false}, true, "OPEN LOOP", "BLM ○", "INT ○", "O2 ●", "(grids frozen)"},
-		{"no-good-frame", ecm.FuelTrim{ClosedLoop: true, BLMEnabled: true}, false, "LOOP —", "BLM ○", "INT ○", "O2 ○", ""},
+		{"closed+enabled", ecm.FuelTrim{ClosedLoop: true, BLMEnabled: true}, true, "CLOSED LOOP", "BLM ●", "INT ●", "O2 ●", "SPARK ●", ""},
+		{"closed+disabled", ecm.FuelTrim{ClosedLoop: true, BLMEnabled: false}, true, "CLOSED LOOP", "BLM ○", "INT ●", "O2 ●", "SPARK ●", "(BLM disabled)"},
+		{"open", ecm.FuelTrim{ClosedLoop: false}, true, "OPEN LOOP", "BLM ○", "INT ○", "O2 ●", "SPARK ●", "(grids frozen)"},
+		{"no-good-frame", ecm.FuelTrim{ClosedLoop: true, BLMEnabled: true}, false, "LOOP —", "BLM ○", "INT ○", "O2 ○", "SPARK ○", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got := LoopStatus(c.ft, c.hasGood)
-			for _, want := range []string{c.badge, c.blm, c.intg, c.o2} {
+			for _, want := range []string{c.badge, c.blm, c.intg, c.o2, c.spark} {
 				if !strings.Contains(got, want) {
 					t.Errorf("LoopStatus = %q, missing %q", got, want)
 				}
@@ -100,6 +101,64 @@ func TestO2BodyPrecision(t *testing.T) {
 	}
 	if !strings.Contains(out, "\033[7m") {
 		t.Error("O2Body should highlight the active cell even in open loop (ungated)")
+	}
+}
+
+// TestSparkBody: spark cells show the grid's Sum (total knocks), not the mean
+// delta; the view is ungated (active-cell highlight and no dimming even in
+// open loop) and the status carries the raw counter.
+func TestSparkBody(t *testing.T) {
+	g := blm.NewSpark()
+	g.Add(1600, 40, 2) // two knock events in one cell: deltas 2 + 3
+	g.Add(1600, 40, 3)
+
+	out := SparkBody(g, gridFrame(0x00, 0, 0), 112) // open loop — spark unaffected
+	if !strings.Contains(out, "KNOCK_CNT 112") {
+		t.Errorf("SparkBody status missing raw counter:\n%s", out)
+	}
+	if !strings.Contains(out, "    5") {
+		t.Errorf("SparkBody cell should show the sum 5 (deltas 2+3), not the mean:\n%s", out)
+	}
+	if !strings.Contains(out, "\033[7m") {
+		t.Error("SparkBody should highlight the active cell (ungated, like O2)")
+	}
+	// Grid cells never dim (minCount is 1) — check the grid portion only; the
+	// explainer block below it is deliberately dim-rendered (cut at its
+	// dim-prefixed first line so the escape stays out of the grid portion).
+	grid, explainer, found := strings.Cut(out, ansiDim+"  SPARK — knock events")
+	if !found {
+		t.Fatalf("SparkBody missing the explainer block:\n%s", out)
+	}
+	if strings.Contains(grid, ansiDim) {
+		t.Error("SparkBody cells should never dim (minCount is 1)")
+	}
+	if !strings.Contains(explainer, "detonation") {
+		t.Errorf("spark explainer should say what a knock count means:\n%s", explainer)
+	}
+	// WinALDL spark axes, not the trim axes: MAP columns start at 30, step 5.
+	if !strings.Contains(out, "  30   35") {
+		t.Errorf("SparkBody header should show the 30/35 MAP columns:\n%s", out)
+	}
+}
+
+// TestGridExplainers: each grid view carries its always-visible "what this
+// table means" block; the streaming BLMBody (monitor -blm) keeps the compact
+// one-line legend instead.
+func TestGridExplainers(t *testing.T) {
+	g := blm.NewDefault()
+	ev := gridFrame(0x82, 130, 188)
+
+	if out := BLMBodyExplained(g, ev, 4); !strings.Contains(out, "Block Learn Multiplier") || !strings.Contains(out, "avg/128") {
+		t.Errorf("BLMBodyExplained missing the meaning/act lines:\n%s", out)
+	}
+	if out := BLMBody(g, ev, 4); strings.Contains(out, "Block Learn Multiplier") || !strings.Contains(out, "target 128") {
+		t.Errorf("BLMBody (monitor) should keep the compact legend, not the explainer:\n%s", out)
+	}
+	if out := INTBody(g, ev, 4, 130); !strings.Contains(out, "Integrator") || !strings.Contains(out, "learned into BLM") {
+		t.Errorf("INTBody missing its explainer:\n%s", out)
+	}
+	if out := O2Body(g, ev, 0.834); !strings.Contains(out, "stoichiometric") || !strings.Contains(out, "0.45") {
+		t.Errorf("O2Body missing its explainer:\n%s", out)
 	}
 }
 
