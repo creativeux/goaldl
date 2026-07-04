@@ -15,6 +15,8 @@ goaldl is a cross-platform Go implementation of an ALDL (Assembly Line Diagnosti
 - `go run ./cmd/goaldl record -p /dev/cu.usbserial-10 -t 60` - **Capture raw bytes to a file (do this first at the car)**
 - `go run ./cmd/goaldl decode drive_4800.raw -o frames.csv` - Decode a capture offline (`pkg/decoder`)
 - `go run ./cmd/goaldl decode -p /dev/cu.usbserial-10 -o live.csv` - Live real-time decode from the vehicle (replaces the old `scan`/`log`)
+- `go run ./cmd/goaldl monitor pkg/decoder/testdata/drive_4800.raw` - Live sensor table (sensor / raw / value), replaying a capture
+- `go run ./cmd/goaldl monitor -p /dev/cu.usbserial-10 -o session.raw` - Same table live from the ECM, optionally recording raw
 - `go run ./cmd/goaldl simulate -n 10` - Generate a synthetic capture for testing decode without hardware
 - `go test ./pkg/decoder -run TestGolden -update` - Regenerate golden files after an intended decoder change (review the diff before committing)
 
@@ -24,7 +26,8 @@ The codebase was consolidated (2026-07-03) down to the working core; all experim
 
 - `pkg/decoder/` - **The decoder** (byte-value state machine) + synthetic encoder + tests. Start here.
   - `testdata/` - real raw captures (`idle_4800.raw`, `drive_4800.raw`) as committed fixtures, plus their `.golden` frame dumps. These are the root of the test suite.
-- `cmd/goaldl/` - CLI: `main.go` (ports/ecms/test/convert) + `capture.go` (record/decode/simulate)
+- `cmd/goaldl/` - CLI: `main.go` (ports/ecms/test/convert) + `capture.go` (record/decode/simulate) + `monitor.go` (live table)
+- `pkg/stream/` - Provider abstraction feeding a live sensor table: `ReplayProvider` (from a capture file) and `SerialProvider` (live ECM, with optional raw recording) drive the same `Renderer`. `BuildRows` (pure) and the providers are unit-tested against the drive fixture.
 - `pkg/ecm/` - ECM definitions and frame parsing (GM 1227747 per A033.ads; byte order verified against the WinALDL log)
 - `pkg/serial/serial.go` - thin serial-port wrapper (`go.bug.st/serial`): open/read/flush/list. No decoding.
 - `pkg/aldl/aldl.go` - just the shared `Frame` type

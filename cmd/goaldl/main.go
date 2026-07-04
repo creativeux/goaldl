@@ -32,6 +32,8 @@ func main() {
 		cmdDecode()
 	case "simulate":
 		cmdSimulate()
+	case "monitor":
+		cmdMonitor()
 	case "ports":
 		cmdPorts()
 	case "ecms":
@@ -55,6 +57,7 @@ func printUsage() {
 	fmt.Println("Commands:")
 	fmt.Println("  record             Capture raw UART bytes to a file (no processing)")
 	fmt.Println("  decode             Decode a capture file, or live from a port with -p")
+	fmt.Println("  monitor            Live sensor table from a port (-p) or a replayed capture file")
 	fmt.Println("  simulate           Generate a synthetic capture for testing decode")
 	fmt.Println("  ports              List available USB serial ports")
 	fmt.Println("  ecms               List supported ECM part numbers")
@@ -66,6 +69,8 @@ func printUsage() {
 	fmt.Println("  goaldl record -p /dev/cu.usbserial-10 -t 60")
 	fmt.Println("  goaldl decode aldl_capture_4800.raw -o frames.csv")
 	fmt.Println("  goaldl decode -p /dev/cu.usbserial-10 -o live.csv   # real-time")
+	fmt.Println("  goaldl monitor pkg/decoder/testdata/drive_4800.raw  # replay as a live table")
+	fmt.Println("  goaldl monitor -p /dev/cu.usbserial-10 -o session.raw   # live table + record")
 	fmt.Println("  goaldl simulate -n 10 && goaldl decode aldl_sim_4800.raw")
 	fmt.Println("  goaldl test data/varied_sensors.hex")
 }
