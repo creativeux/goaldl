@@ -139,87 +139,87 @@ func (r *Registry) extractParameterValue(data []byte, param *Parameter) (float64
 	return raw*param.Factor + param.Bias, nil
 }
 
-// coolantTempLookup converts raw coolant temp byte to Fahrenheit using A033.ads lookup table
+// coolantTempLookup converts a raw coolant-temperature byte to °F using the
+// A033.ads thermistor table. The breakpoints are ascending and contiguous
+// (they tile 0-255 with no gaps), so each case needs only its upper bound —
+// the lower bound is guaranteed by the earlier cases having been excluded.
 func coolantTempLookup(rawValue byte) float64 {
 	switch {
 	case rawValue <= 12:
 		return 302.0
-	case rawValue == 13:
+	case rawValue <= 13:
 		return 293.0
-	case rawValue == 14:
+	case rawValue <= 14:
 		return 284.0
-	case rawValue == 15:
+	case rawValue <= 17:
 		return 275.0
-	case rawValue >= 16 && rawValue <= 17:
-		return 275.0
-	case rawValue >= 18 && rawValue <= 20:
+	case rawValue <= 20:
 		return 266.0
-	case rawValue >= 21 && rawValue <= 22:
+	case rawValue <= 22:
 		return 257.0
-	case rawValue >= 23 && rawValue <= 25:
+	case rawValue <= 25:
 		return 248.0
-	case rawValue >= 26 && rawValue <= 29:
+	case rawValue <= 29:
 		return 239.0
-	case rawValue >= 30 && rawValue <= 33:
+	case rawValue <= 33:
 		return 230.0
-	case rawValue >= 34 && rawValue <= 38:
+	case rawValue <= 38:
 		return 221.0
-	case rawValue >= 39 && rawValue <= 43:
+	case rawValue <= 43:
 		return 212.0
-	case rawValue >= 44 && rawValue <= 49:
+	case rawValue <= 49:
 		return 203.0
-	case rawValue >= 50 && rawValue <= 55:
+	case rawValue <= 55:
 		return 194.0
-	case rawValue >= 56 && rawValue <= 63:
+	case rawValue <= 63:
 		return 185.0
-	case rawValue >= 64 && rawValue <= 71:
+	case rawValue <= 71:
 		return 176.0
-	case rawValue >= 72 && rawValue <= 80:
+	case rawValue <= 80:
 		return 167.0
-	case rawValue >= 81 && rawValue <= 91:
+	case rawValue <= 91:
 		return 158.0
-	case rawValue >= 92 && rawValue <= 101:
+	case rawValue <= 101:
 		return 149.0
-	case rawValue >= 102 && rawValue <= 113:
+	case rawValue <= 113:
 		return 140.0
-	case rawValue >= 114 && rawValue <= 125:
+	case rawValue <= 125:
 		return 131.0
-	case rawValue >= 126 && rawValue <= 138:
+	case rawValue <= 138:
 		return 122.0
-	case rawValue >= 139 && rawValue <= 151:
+	case rawValue <= 151:
 		return 113.0
-	case rawValue >= 152 && rawValue <= 164:
+	case rawValue <= 164:
 		return 104.0
-	case rawValue >= 165 && rawValue <= 176:
+	case rawValue <= 176:
 		return 95.0
-	case rawValue >= 177 && rawValue <= 188:
+	case rawValue <= 188:
 		return 86.0
-	case rawValue >= 189 && rawValue <= 198:
+	case rawValue <= 198:
 		return 77.0
-	case rawValue >= 199 && rawValue <= 208:
+	case rawValue <= 208:
 		return 68.0
-	case rawValue >= 209 && rawValue <= 217:
+	case rawValue <= 217:
 		return 59.0
-	case rawValue >= 218 && rawValue <= 224:
+	case rawValue <= 224:
 		return 50.0
-	case rawValue >= 225 && rawValue <= 230:
+	case rawValue <= 230:
 		return 41.0
-	case rawValue >= 231 && rawValue <= 236:
+	case rawValue <= 236:
 		return 32.0
-	case rawValue >= 237 && rawValue <= 240:
+	case rawValue <= 240:
 		return 23.0
-	case rawValue >= 241 && rawValue <= 244:
+	case rawValue <= 244:
 		return 14.0
-	case rawValue >= 245 && rawValue <= 246:
+	case rawValue <= 246:
 		return 5.0
-	case rawValue >= 247 && rawValue <= 249:
+	case rawValue <= 249:
 		return -4.0
-	case rawValue == 250:
+	case rawValue <= 250:
 		return -13.0
-	case rawValue >= 251 && rawValue <= 252:
+	case rawValue <= 252:
 		return -22.0
-	case rawValue >= 253:
+	default:
 		return -40.0
 	}
-	return 0.0 // Should never reach here
 }

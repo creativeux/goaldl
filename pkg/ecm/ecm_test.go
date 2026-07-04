@@ -39,6 +39,40 @@ func TestParseFrameConversions(t *testing.T) {
 	}
 }
 
+// TestCoolantTempLookup pins the A033.ads thermistor table: each breakpoint's
+// upper-bound raw value must return the table's °F, and the very next raw value
+// must step to the next (lower) temperature. Expected values come from the
+// A033.ads table, so this guards the hand-transcribed switch.
+func TestCoolantTempLookup(t *testing.T) {
+	// {upper raw of a range, °F for that range}, ascending.
+	table := []struct {
+		raw  byte
+		temp float64
+	}{
+		{12, 302}, {13, 293}, {14, 284}, {17, 275}, {20, 266}, {22, 257},
+		{25, 248}, {29, 239}, {33, 230}, {38, 221}, {43, 212}, {49, 203},
+		{55, 194}, {63, 185}, {71, 176}, {80, 167}, {91, 158}, {101, 149},
+		{113, 140}, {125, 131}, {138, 122}, {151, 113}, {164, 104}, {176, 95},
+		{188, 86}, {198, 77}, {208, 68}, {217, 59}, {224, 50}, {230, 41},
+		{236, 32}, {240, 23}, {244, 14}, {246, 5}, {249, -4}, {250, -13},
+		{252, -22}, {255, -40},
+	}
+	for i, b := range table {
+		if got := coolantTempLookup(b.raw); got != b.temp {
+			t.Errorf("coolantTempLookup(%d) = %v, want %v", b.raw, got, b.temp)
+		}
+		// The value one past this breakpoint must belong to the next range.
+		if i+1 < len(table) {
+			if got := coolantTempLookup(b.raw + 1); got != table[i+1].temp {
+				t.Errorf("coolantTempLookup(%d) = %v, want %v (next range)", b.raw+1, got, table[i+1].temp)
+			}
+		}
+	}
+	if got := coolantTempLookup(0); got != 302 {
+		t.Errorf("coolantTempLookup(0) = %v, want 302", got)
+	}
+}
+
 // TestExtractParameterValue exercises the generic converter directly, including
 // the Bias term (unused by the 1227747 but part of the model) and error cases.
 func TestExtractParameterValue(t *testing.T) {
