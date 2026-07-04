@@ -161,6 +161,31 @@ func TestBuildRows(t *testing.T) {
 	if !strings.Contains(prom.Raw, "0x18") || !strings.Contains(prom.Raw, "0x93") {
 		t.Errorf("PROM row raw = %q, want both bytes", prom.Raw)
 	}
+
+	// Dual-unit Alt column: coolant 158°F → 70°C; MAP byte 0x5B=91 →
+	// (91+28.06)/2.71 ≈ 43.93 kPa; TPS byte 0x36=54 → ~1.7% (default cal);
+	// no Alt on RPM.
+	ct := find("coolant")
+	if !strings.Contains(ct.Alt, "70") || !strings.Contains(ct.Alt, "°C") {
+		t.Errorf("coolant Alt = %q, want 70 °C", ct.Alt)
+	}
+	mapRow := find("map")
+	if !strings.Contains(mapRow.Alt, "43.93") || !strings.Contains(mapRow.Alt, "kPa") {
+		t.Errorf("MAP Alt = %q, want 43.93 kPa", mapRow.Alt)
+	}
+	tps := find("tps")
+	if !strings.Contains(tps.Alt, "%") {
+		t.Errorf("TPS Alt = %q, want a percent value", tps.Alt)
+	}
+	if rpm.Alt != "" {
+		t.Errorf("RPM Alt = %q, want blank (no alternate)", rpm.Alt)
+	}
+
+	// Knock counter row exists (byte 17 = 0x70 = 112).
+	knock := find("knock")
+	if !strings.Contains(knock.Raw, "112") {
+		t.Errorf("knock row = %+v, want raw 112", knock)
+	}
 }
 
 func parseHelper(r *ecm.Registry, frame []byte) (map[string]float64, error) {

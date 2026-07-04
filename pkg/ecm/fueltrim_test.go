@@ -26,9 +26,9 @@ func TestFuelTrimSample(t *testing.T) {
 	if ft.BLM != 118 {
 		t.Errorf("BLM = %v, want 118", ft.BLM)
 	}
-	// MAP: 99*0.0196 = 1.9404 V -> 21.25*1.9404-1.25 ≈ 39.98 kPa
-	if math.Abs(ft.MapKPa-39.98) > 0.1 {
-		t.Errorf("MapKPa = %.2f, want ~39.98", ft.MapKPa)
+	// MAP: kPa = (99+28.06)/2.71 ≈ 46.89 (WinALDL-verified transfer).
+	if math.Abs(ft.MapKPa-46.89) > 0.1 {
+		t.Errorf("MapKPa = %.2f, want ~46.89", ft.MapKPa)
 	}
 	if !ft.ClosedLoop || !ft.BLMEnabled || !ft.Recordable() {
 		t.Errorf("flags: closed=%v blm=%v recordable=%v, want all true", ft.ClosedLoop, ft.BLMEnabled, ft.Recordable())

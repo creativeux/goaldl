@@ -33,6 +33,8 @@ func cmdMonitor(args []string) {
 	csvOut := fs.String("csv", "", "Also export decoded frames to this CSV file (sensor view)")
 	blmView := fs.Bool("blm", false, "Show a live BLM fuel-trim grid instead of the sensor table")
 	minSamples := fs.Int("min", blm.DefaultMinSamples, "BLM view: samples before a cell is trusted (shown solid vs dim)")
+	tps0 := fs.Float64("tps0", ecm.DefaultTPS0, "TPS calibration: volts at 0% throttle")
+	tps100 := fs.Float64("tps100", ecm.DefaultTPS100, "TPS calibration: volts at 100% throttle")
 	speed := fs.Float64("speed", 1.0, "Replay only: playback speed (1=real time, 0=as fast as possible)")
 	fs.Parse(args)
 
@@ -43,6 +45,7 @@ func cmdMonitor(args []string) {
 		fmt.Fprintf(os.Stderr, "Unknown ECM: %s\n", *ecmPart)
 		os.Exit(1)
 	}
+	def = calibratedDef(def, *tps0, *tps100)
 
 	var provider stream.Provider
 	var title string
@@ -101,7 +104,7 @@ func cmdMonitor(args []string) {
 		csv = c
 	}
 
-	renderer := stream.NewRenderer(os.Stdout, isTTY(os.Stdout), registry, *ecmPart, *promID, title)
+	renderer := stream.NewRenderer(os.Stdout, isTTY(os.Stdout), def, *promID, title)
 	var frames int
 	err := provider.Run(ctx, func(ev stream.FrameEvent) {
 		frames++

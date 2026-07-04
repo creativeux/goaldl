@@ -51,13 +51,13 @@ func FuelTrimSample(frame []byte) FuelTrim {
 	}
 }
 
-// MapVoltsToKPa converts A033 MAP sensor voltage to manifold pressure.
+// MapVoltsToKPa converts A033 MAP sensor voltage to manifold pressure using
+// the GM 1-bar transfer kPa = (raw + 28.06) / 2.71.
 //
-// ASSUMPTION — VERIFY against WinALDL: A033.ads reports MAP only in volts, so
-// this uses the standard GM 1-bar transfer (~1V≈20 kPa idle vacuum, ~4.9V≈105
-// kPa near WOT). If WinALDL's kPa column disagrees, adjust slope/offset here;
-// the BLM binning and correction math do not depend on it.
+// VERIFIED 2026-07-04 against data/20250601_111156_LOG.txt: WinALDL's kPa
+// column matches this formula exactly across the log's raw range 49–190
+// (49→28.4, 101→47.6, 183→77.9). Replaces the earlier assumed transfer,
+// which read ~3 kPa low at idle.
 func MapVoltsToKPa(v float64) float64 {
-	const slope, offset = 21.25, -1.25
-	return slope*v + offset
+	return (v/0.0196 + 28.06) / 2.71
 }

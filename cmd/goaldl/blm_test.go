@@ -39,17 +39,20 @@ func TestAccumulateBLM(t *testing.T) {
 	if got := grid.TotalSamples() + openLoop + blmOff; got != len(frames) {
 		t.Errorf("recorded+skipped = %d, want %d frames", got, len(frames))
 	}
-	if pop := grid.PopulatedCells(blm.DefaultMinSamples); pop != 25 {
-		t.Errorf("populated cells (>=4) = %d, want 25", pop)
+	if pop := grid.PopulatedCells(blm.DefaultMinSamples); pop != 27 {
+		t.Errorf("populated cells (>=4) = %d, want 27", pop)
 	}
 
-	// Cell 1600 RPM × 40 kPa: average ~116.0, correction ~0.906 (116/128).
+	// Cell 1600 RPM × 40 kPa: average ~117.2, correction ~0.915 — re-derived
+	// 2026-07-04 for the WinALDL-verified MAP transfer (raw+28.06)/2.71.
+	// Cross-check: WinALDL's own table from this vehicle (data/
+	// 20250601_162123_BLM.txt, different session) has 117.5 in this cell.
 	r, c := grid.Cell(1600, 40)
-	if avg := grid.Average()[r][c]; math.Abs(avg-116.0) > 0.1 {
-		t.Errorf("cell 1600/40 average = %.2f, want ~116.0", avg)
+	if avg := grid.Average()[r][c]; math.Abs(avg-117.17) > 0.1 {
+		t.Errorf("cell 1600/40 average = %.2f, want ~117.17", avg)
 	}
-	if corr := grid.CorrectionAtLeast(blm.DefaultMinSamples)[r][c]; math.Abs(corr-0.906) > 0.002 {
-		t.Errorf("cell 1600/40 correction = %.3f, want ~0.906", corr)
+	if corr := grid.CorrectionAtLeast(blm.DefaultMinSamples)[r][c]; math.Abs(corr-0.915) > 0.002 {
+		t.Errorf("cell 1600/40 correction = %.3f, want ~0.915", corr)
 	}
 }
 

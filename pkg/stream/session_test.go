@@ -47,6 +47,28 @@ func TestSnapshotComposition(t *testing.T) {
 	if !snap.FuelTrim.Recordable() || snap.FuelTrim.BLM != 118 {
 		t.Errorf("FuelTrim = %+v, want recordable BLM 118", snap.FuelTrim)
 	}
+	// Flags and codes ride along as plain data (MWAF1=0x82 → closed loop set).
+	var loopSet bool
+	for _, w := range snap.Flags {
+		if w.Word == "MWAF1" {
+			for _, b := range w.Bits {
+				if b.Name == "Loop status" && b.Set {
+					loopSet = true
+				}
+			}
+		}
+	}
+	if !loopSet {
+		t.Errorf("Flags should decode MWAF1 loop status as set: %+v", snap.Flags)
+	}
+	if len(snap.Codes) != 24 {
+		t.Errorf("Codes carries %d entries, want 24", len(snap.Codes))
+	}
+	for _, c := range snap.Codes {
+		if c.Set {
+			t.Errorf("code %d set on a clean frame", c.Code)
+		}
+	}
 }
 
 func TestSnapshotPROMMismatchAndDisable(t *testing.T) {
@@ -74,6 +96,9 @@ func TestSnapshotShortFrame(t *testing.T) {
 	}
 	if snap.PROMOK {
 		t.Error("PROMOK should be false for a short frame")
+	}
+	if snap.Flags != nil || snap.Codes != nil {
+		t.Error("Flags/Codes should be nil for a short frame")
 	}
 }
 

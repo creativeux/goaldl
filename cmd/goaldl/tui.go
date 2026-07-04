@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -17,8 +16,9 @@ import (
 )
 
 // cmdTUI launches the interactive dashboard — the default face of goaldl. It
-// navigates between the sensor table, the BLM grid, and a raw frame view,
-// driven by a stream.Session over either a live ECM (-p) or a replayed capture.
+// navigates between the sensor table, the BLM grid, the flag-data and
+// error-code views, and a scrolling raw-byte history, driven by a
+// stream.Session over either a live ECM (-p) or a replayed capture.
 //
 //	goaldl -p /dev/cu.usbserial-10
 //	goaldl drive_4800.raw [-speed 2]
@@ -30,15 +30,19 @@ func cmdTUI(args []string) {
 	promID := fs.Int("prom", 6291, "Expected PROM ID for the sync indicator (0 to disable)")
 	invert := fs.Bool("invert", false, "Invert byte values (non-inverting cable)")
 	minSamples := fs.Int("min", blm.DefaultMinSamples, "BLM: samples before a cell is trusted")
+	tps0 := fs.Float64("tps0", ecm.DefaultTPS0, "TPS calibration: volts at 0% throttle")
+	tps100 := fs.Float64("tps100", ecm.DefaultTPS100, "TPS calibration: volts at 100% throttle")
 	speed := fs.Float64("speed", 1.0, "Replay only: playback speed (1=real time, 0=as fast as possible)")
 	fs.Parse(args)
 
 	cfg := decoder.Config{BaudRate: *baudRate, FrameSize: 20, SyncBits: 9, Invert: *invert}
 	registry := ecm.NewRegistry()
-	if _, ok := registry.GetDefinition(*ecmPart); !ok {
+	def, ok := registry.GetDefinition(*ecmPart)
+	if !ok {
 		fmt.Fprintf(os.Stderr, "Unknown ECM: %s\n", *ecmPart)
 		os.Exit(1)
 	}
+	def = calibratedDef(def, *tps0, *tps100)
 
 	var provider stream.Provider
 	if *portName != "" {
@@ -80,8 +84,7 @@ func cmdTUI(args []string) {
 	}()
 
 	m := tuiModel{
-		registry:   registry,
-		ecmPart:    *ecmPart,
+		def:        def,
 		minSamples: *minSamples,
 		source:     session.Name(),
 		snaps:      snaps,
@@ -96,13 +99,31 @@ func cmdTUI(args []string) {
 	cancel()
 }
 
+// calibratedDef applies the TPS calibration flags to a definition copy,
+// falling back to the defaults (with a warning) on a degenerate range.
+func calibratedDef(def *ecm.Definition, tps0, tps100 float64) *ecm.Definition {
+	if tps100 <= tps0 {
+		fmt.Fprintf(os.Stderr, "Invalid TPS calibration (%.2f..%.2fV); using defaults %.2f..%.2fV\n",
+			tps0, tps100, ecm.DefaultTPS0, ecm.DefaultTPS100)
+		return def
+	}
+	return def.WithTPSCalibration(tps0, tps100)
+}
+
 type view int
 
 const (
 	viewSensors view = iota
 	viewBLM
+	viewFlags
+	viewCodes
 	viewRaw
+	viewCount
 )
+
+// rawHistoryCap bounds the raw-frame ring; more than the widest terminal can
+// show (the view itself caps at 14 columns, WinALDL-style).
+const rawHistoryCap = 64
 
 // snapshotMsg carries one processed frame into the update loop; providerDoneMsg
 // signals the stream ended (replay finished or port closed).
@@ -113,8 +134,7 @@ type (
 
 type tuiModel struct {
 	// config / wiring
-	registry   *ecm.Registry
-	ecmPart    string
+	def        *ecm.Definition
 	minSamples int
 	source     string
 	snaps      <-chan stream.Snapshot
@@ -123,8 +143,13 @@ type tuiModel struct {
 	// state
 	width, height int
 	active        view
-	latest        stream.Snapshot
+	latest        stream.Snapshot // every frame, drives the raw view + heartbeat
+	lastGood      stream.Snapshot // latest ParseOK frame, drives all decoded views
 	hasFrame      bool
+	hasGood       bool
+	history       [][]byte // raw frames, newest first, capped at rawHistoryCap
+	okCount       int
+	badCount      int
 	grid          *blm.Grid
 	frameCount    int
 	done          bool
@@ -159,11 +184,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "2":
 			m.active = viewBLM
 		case "3":
+			m.active = viewFlags
+		case "4":
+			m.active = viewCodes
+		case "5":
 			m.active = viewRaw
 		case "tab", "right", "l":
-			m.active = (m.active + 1) % 3
+			m.active = (m.active + 1) % viewCount
 		case "shift+tab", "left", "h":
-			m.active = (m.active + 2) % 3
+			m.active = (m.active + viewCount - 1) % viewCount
 		}
 
 	case snapshotMsg:
@@ -171,6 +200,22 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.latest = s
 		m.hasFrame = true
 		m.frameCount++
+		// The raw history takes every frame — the raw view is never gated
+		// (WinALDL behavior: a bad sample still updates the RAW tab). The
+		// decoded views render from lastGood instead.
+		frame := make([]byte, len(s.Frame.Data))
+		copy(frame, s.Frame.Data)
+		m.history = append([][]byte{frame}, m.history...)
+		if len(m.history) > rawHistoryCap {
+			m.history = m.history[:rawHistoryCap]
+		}
+		if s.ParseOK {
+			m.lastGood = s
+			m.hasGood = true
+			m.okCount++
+		} else {
+			m.badCount++
+		}
 		if s.FuelTrim.Recordable() {
 			m.grid.Add(s.FuelTrim.RPM, s.FuelTrim.MapKPa, s.FuelTrim.BLM)
 		}
@@ -186,10 +231,12 @@ var (
 	tabActive   = lipgloss.NewStyle().Bold(true).Reverse(true).Padding(0, 1)
 	tabInactive = lipgloss.NewStyle().Faint(true).Padding(0, 1)
 	dimStyle    = lipgloss.NewStyle().Faint(true)
+	beatOK      = lipgloss.NewStyle().Foreground(lipgloss.Color("2")) // green
+	beatBad     = lipgloss.NewStyle().Foreground(lipgloss.Color("1")) // red
 )
 
 func (m tuiModel) View() string {
-	tabs := []string{"1 Sensors", "2 BLM grid", "3 Raw"}
+	tabs := []string{"1 Sensors", "2 BLM grid", "3 Flags", "4 Codes", "5 Raw"}
 	rendered := make([]string, len(tabs))
 	for i, t := range tabs {
 		if view(i) == m.active {
@@ -204,35 +251,43 @@ func (m tuiModel) View() string {
 	switch {
 	case !m.hasFrame:
 		body = dimStyle.Render("\n  waiting for frames…")
-	case m.active == viewSensors:
-		body = stream.SensorTable(m.latest.FrameEvent, m.registry, m.ecmPart)
-	case m.active == viewBLM:
-		body = stream.BLMBody(m.grid, m.latest.FrameEvent, m.minSamples)
 	case m.active == viewRaw:
 		body = m.rawView()
+	case !m.hasGood:
+		body = dimStyle.Render("\n  waiting for a parseable frame… (see 5 Raw for the byte stream)")
+	case m.active == viewSensors:
+		body = stream.SensorTable(m.lastGood.FrameEvent, m.def)
+	case m.active == viewBLM:
+		body = stream.BLMBody(m.grid, m.lastGood.FrameEvent, m.minSamples)
+	case m.active == viewFlags:
+		body = stream.FlagsBody(m.lastGood.Flags)
+	case m.active == viewCodes:
+		body = stream.CodesBody(m.lastGood.Codes)
 	}
 
-	status := fmt.Sprintf("frame %d   t=%.1fs   %s",
-		m.latest.Index, m.latest.Elapsed.Seconds(), promMark(m.latest.PROMOK))
+	status := fmt.Sprintf("frame %d   t=%.1fs   %s   %s %d ok / %d bad",
+		m.latest.Index, m.latest.Elapsed.Seconds(), promMark(m.latest.PROMOK),
+		m.heartbeat(), m.okCount, m.badCount)
 	if m.done {
 		status += "   " + dimStyle.Render("(stream ended)")
 	}
-	footer := status + "   " + dimStyle.Render("1-3/tab switch · q quit")
+	footer := status + "   " + dimStyle.Render("1-5/tab switch · q quit")
 
 	return header + "\n\n" + body + "\n\n" + footer
 }
 
-func (m tuiModel) rawView() string {
-	f := m.latest.Frame.Data
-	var hex strings.Builder
-	for i, b := range f {
-		if i > 0 && i%10 == 0 {
-			hex.WriteString("\n           ")
-		}
-		fmt.Fprintf(&hex, " %02X", b)
+// heartbeat is the per-frame data-quality tick: green when the latest frame
+// parsed and PROM-matched, red otherwise (WinALDL's flashing indicator).
+func (m tuiModel) heartbeat() string {
+	if m.latest.ParseOK && m.latest.PROMOK {
+		return beatOK.Render("●")
 	}
-	return fmt.Sprintf("  offset %d\n  bytes:  %s\n\n  %s",
-		m.latest.Frame.ByteOffset, strings.TrimSpace(hex.String()), promMark(m.latest.PROMOK))
+	return beatBad.Render("●")
+}
+
+func (m tuiModel) rawView() string {
+	head := fmt.Sprintf("  offset %d   %s\n\n", m.latest.Frame.ByteOffset, promMark(m.latest.PROMOK))
+	return head + stream.RawHistory(m.def.ByteLabels, m.history, m.width)
 }
 
 func promMark(ok bool) string {
