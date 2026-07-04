@@ -275,9 +275,25 @@ func TestTUIViewPerTab(t *testing.T) {
 
 	mm.active = viewSpark
 	sv := mm.View()
-	for _, want := range []string{"KNOCK_CNT", "knocks detected"} {
+	for _, want := range []string{"KNOCK_CNT", "knock events"} {
 		if !strings.Contains(sv, want) {
 			t.Errorf("spark view missing %q", want)
+		}
+	}
+
+	// Every grid tab carries its "what this table means" explainer.
+	for _, tc := range []struct {
+		v      view
+		marker string
+	}{
+		{viewBLM, "Block Learn Multiplier"},
+		{viewINT, "Integrator"},
+		{viewO2, "stoichiometric"},
+		{viewSpark, "detonation"},
+	} {
+		mm.active = tc.v
+		if !strings.Contains(mm.View(), tc.marker) {
+			t.Errorf("tab %d missing its explainer (want %q)", tc.v, tc.marker)
 		}
 	}
 

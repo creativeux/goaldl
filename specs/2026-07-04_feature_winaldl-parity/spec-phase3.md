@@ -161,6 +161,10 @@ func writeSparkFile(w io.Writer, g *blm.Grid) // Samples (frames with knock) + K
 | End-to-end drive fixture: all 8 tabs render; spark total == independently computed KNOCK_CNT deltas over the same frames; BLM still 469 | `cmd/goaldl/tui_test.go` | `drive_4800.raw` + independent accumulation |
 | Regression: decoder goldens byte-identical (no `-update`); `monitor`/`blm` untouched (`BLMBody`/`SensorTable` signatures unchanged; `gridHeat` change covered by existing BLM/INT/O2 view tests); `Snapshot`/`Session` API unchanged | existing suites | — |
 
+## 8b. Post-implementation addition — grid explainers (user feedback, 2026-07-04)
+
+Each grid tab must say **what the table means**, not just how to read its numbers. Every grid view (BLM / INT / O2 / Spark) renders an always-visible, dim "what this table means" block (4–6 lines, ≤78 chars/line) in place of the former one-line legend: what the table is, how to read it, and how to act on it (BLM: multiply base VE/fuel by avg/128; INT: trust sustained averages, cross-check against BLM; O2: ~0.45 V stoich, stuck cells = masked mixture offset; Spark: goal 0, repeating counts = pull timing/add fuel). The explainer text lives as constants in `pkg/stream/gridviews.go` next to the builders. **`monitor -blm` is unchanged**: `BLMBody` keeps its compact one-line legend (in-place streaming redraw); the dashboard uses a new `BLMBodyExplained` variant (both delegate to an unexported `blmBody`). Tested: each explainer present in its view (`TestGridExplainers` + per-tab TUI assertions); monitor's `BLMBody` asserted explainer-free; the spark never-dim assertion scoped to the grid rows (the explainer block is deliberately dim).
+
 ## 9. Out of scope (Phase 3)
 
 Dash (big-number) view, config-file persistence, multi-ECM definitions (Phase 4); `serve` adapter (separate feature); Narrow/Avg10/StdDev grid modes and any decode-path filtering (permanent non-goals). `monitor` gains no spark view or runtime toggles (dashboard-only; its pre-declared `-o`/`-csv` flags remain the scripting idiom). No recording of replay sources.

@@ -122,15 +122,43 @@ func TestSparkBody(t *testing.T) {
 	if !strings.Contains(out, "\033[7m") {
 		t.Error("SparkBody should highlight the active cell (ungated, like O2)")
 	}
-	if strings.Contains(out, ansiDim) {
+	// Grid cells never dim (minCount is 1) — check the grid portion only; the
+	// explainer block below it is deliberately dim-rendered (cut at its
+	// dim-prefixed first line so the escape stays out of the grid portion).
+	grid, explainer, found := strings.Cut(out, ansiDim+"  SPARK — knock events")
+	if !found {
+		t.Fatalf("SparkBody missing the explainer block:\n%s", out)
+	}
+	if strings.Contains(grid, ansiDim) {
 		t.Error("SparkBody cells should never dim (minCount is 1)")
 	}
-	if !strings.Contains(out, "knocks detected") {
-		t.Errorf("SparkBody missing legend:\n%s", out)
+	if !strings.Contains(explainer, "detonation") {
+		t.Errorf("spark explainer should say what a knock count means:\n%s", explainer)
 	}
 	// WinALDL spark axes, not the trim axes: MAP columns start at 30, step 5.
 	if !strings.Contains(out, "  30   35") {
 		t.Errorf("SparkBody header should show the 30/35 MAP columns:\n%s", out)
+	}
+}
+
+// TestGridExplainers: each grid view carries its always-visible "what this
+// table means" block; the streaming BLMBody (monitor -blm) keeps the compact
+// one-line legend instead.
+func TestGridExplainers(t *testing.T) {
+	g := blm.NewDefault()
+	ev := gridFrame(0x82, 130, 188)
+
+	if out := BLMBodyExplained(g, ev, 4); !strings.Contains(out, "Block Learn Multiplier") || !strings.Contains(out, "avg/128") {
+		t.Errorf("BLMBodyExplained missing the meaning/act lines:\n%s", out)
+	}
+	if out := BLMBody(g, ev, 4); strings.Contains(out, "Block Learn Multiplier") || !strings.Contains(out, "target 128") {
+		t.Errorf("BLMBody (monitor) should keep the compact legend, not the explainer:\n%s", out)
+	}
+	if out := INTBody(g, ev, 4, 130); !strings.Contains(out, "Integrator") || !strings.Contains(out, "learned into BLM") {
+		t.Errorf("INTBody missing its explainer:\n%s", out)
+	}
+	if out := O2Body(g, ev, 0.834); !strings.Contains(out, "stoichiometric") || !strings.Contains(out, "0.45") {
+		t.Errorf("O2Body missing its explainer:\n%s", out)
 	}
 }
 

@@ -55,9 +55,22 @@ func (v *BLMView) Render(ev FrameEvent) {
 
 // BLMBody renders the BLM status line, the Wide-Average grid (active cell
 // reverse-highlighted, cells below minCount dimmed as still-accumulating), and
-// the legend — as a string with no title/frame/time chrome, for embedding in a
-// TUI or the streaming view. It reads the grid but does not modify it.
+// the compact one-line legend — the streaming `monitor -blm` variant, which
+// redraws in place and keeps its chrome tight. It reads the grid but does not
+// modify it.
 func BLMBody(g *blm.Grid, ev FrameEvent, minCount int) string {
+	legend := fmt.Sprintf("  target 128:  >128 lean, <128 rich;  · = no data, dim = <%d samples", minCount)
+	return blmBody(g, ev, minCount, legend)
+}
+
+// BLMBodyExplained is BLMBody with the full "what this table means" block in
+// place of the compact legend — the dashboard variant, where the explainer is
+// always visible under the grid.
+func BLMBodyExplained(g *blm.Grid, ev FrameEvent, minCount int) string {
+	return blmBody(g, ev, minCount, blmExplainer)
+}
+
+func blmBody(g *blm.Grid, ev FrameEvent, minCount int, legend string) string {
 	ft := ecm.FuelTrimSample(ev.Frame.Data)
 	ar, ac := -1, -1
 	if ft.Recordable() {
@@ -76,7 +89,5 @@ func BLMBody(g *blm.Grid, ev FrameEvent, minCount int) string {
 	default:
 		status = "block learn disabled — not recording"
 	}
-
-	legend := fmt.Sprintf("  target 128:  >128 lean, <128 rich;  · = no data, dim = <%d samples", minCount)
 	return gridHeat(g, g.Average(), ar, ac, minCount, 0, status, legend)
 }

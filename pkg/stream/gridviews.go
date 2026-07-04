@@ -65,6 +65,41 @@ func fmtCell(v float64, prec int) string {
 	return fmt.Sprintf("%5.*f", prec, v)
 }
 
+// Grid explainers: the always-visible "what this table means" block rendered
+// dim under each grid tab, in place of a terse one-line legend (user request,
+// 2026-07-04). Written for the at-the-car operator: what the table is, how to
+// read it, and how to act on it. BLM's lives here but is applied only by the
+// dashboard (BLMBodyExplained) — `monitor -blm` keeps the compact legend for
+// its in-place streaming redraw.
+const (
+	blmExplainer = ansiDim + `  BLM — Block Learn Multiplier: the fuel correction the ECM has LEARNED
+  long-term for each RPM×MAP cell (recorded in closed loop with block learn
+  enabled). 128 = base fuel table correct here · >128 ECM is adding fuel →
+  your tune is LEAN there · <128 removing fuel → RICH.
+  Act: multiply that cell's base VE/fuel by avg/128 — the saved Correction
+  table does this math.  · = no data · dim = too few samples to trust yet` + ansiReset
+
+	intExplainer = ansiDim + `  INT — Integrator: the ECM's short-term fuel correction RIGHT NOW (resets
+  constantly; its persistent lean/rich error is what gets learned into BLM).
+  128 = no correction · >128 adding fuel (lean) · <128 removing (rich).
+  It hunts by design in closed loop — read sustained cell averages, not
+  single samples. If INT and BLM lean the same way in a cell, the mixture
+  error there is real.` + ansiReset
+
+	o2Explainer = ansiDim + `  O2 — narrowband oxygen sensor voltage, averaged per cell. ~0.45 V =
+  stoichiometric · below ~0.3 V lean · above ~0.7 V rich. In closed loop it
+  oscillates around 0.45 by design (cell averages near 0.45 are healthy);
+  a cell stuck high or low is a real mixture offset the trims may be
+  masking. Ungated — records every frame, so open-loop cells (WOT / cold)
+  show the true uncorrected mixture.` + ansiReset
+
+	sparkExplainer = ansiDim + `  SPARK — knock events: how many times the ESC counted detonation in each
+  cell this session (deltas of the cumulative knock counter). The goal is 0
+  everywhere. A repeating count in a cell = too much spark advance or too
+  lean under that load — pull timing or add fuel there and re-test. A lone
+  count on startup or rough road can be false knock; look for repetition.` + ansiReset
+)
+
 // INTBody renders the integrator (short-term fuel trim) grid. Like BLM it bins
 // by RPM×MAP and shows the Wide Average, but it gates on closed loop only
 // (block-learn-enable is a BLM-specific gate). intVal is the current frame's
@@ -80,8 +115,7 @@ func INTBody(g *blm.Grid, ev FrameEvent, minCount int, intVal float64) string {
 		status = fmt.Sprintf("CLOSED LOOP  RPM %.0f  MAP %.0f kPa  INT %.0f%s",
 			ft.RPM, ft.MapKPa, intVal, prog)
 	}
-	return gridHeat(g, g.Average(), ar, ac, minCount, 0, status,
-		"  target 128:  >128 adding fuel (lean), <128 removing (rich)")
+	return gridHeat(g, g.Average(), ar, ac, minCount, 0, status, intExplainer)
 }
 
 // O2Body renders the oxygen-sensor voltage grid. O2 is ungated (populates every
@@ -94,7 +128,7 @@ func O2Body(g *blm.Grid, ev FrameEvent, o2Volts float64) string {
 	ft := ecm.FuelTrimSample(ev.Frame.Data)
 	ar, ac := g.Cell(ft.RPM, ft.MapKPa)
 	status := fmt.Sprintf("O2 %.3f V  RPM %.0f  MAP %.0f kPa", o2Volts, ft.RPM, ft.MapKPa)
-	return gridHeat(g, g.Average(), ar, ac, 1, 2, status, "  volts; higher = richer exhaust; · = no data")
+	return gridHeat(g, g.Average(), ar, ac, 1, 2, status, o2Explainer)
 }
 
 // SparkBody renders the knock-events grid: each cell is the total knocks
@@ -109,7 +143,7 @@ func SparkBody(g *blm.Grid, ev FrameEvent, knockCnt float64) string {
 	ft := ecm.FuelTrimSample(ev.Frame.Data)
 	ar, ac := g.Cell(ft.RPM, ft.MapKPa)
 	status := fmt.Sprintf("KNOCK_CNT %.0f  RPM %.0f  MAP %.0f kPa", knockCnt, ft.RPM, ft.MapKPa)
-	return gridHeat(g, g.Sum(), ar, ac, 1, 0, status, "  knocks detected per cell this session; · = none")
+	return gridHeat(g, g.Sum(), ar, ac, 1, 0, status, sparkExplainer)
 }
 
 // LoopBadge is the loop-state word: CLOSED LOOP / OPEN LOOP, or "LOOP —" before

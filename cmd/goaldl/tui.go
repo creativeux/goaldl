@@ -743,7 +743,7 @@ func (m tuiModel) View() string {
 	case m.active == viewSensors:
 		body = stream.SensorTableExtrema(m.lastGood.FrameEvent, m.def, m.mins, m.maxs)
 	case m.active == viewBLM:
-		body = stream.BLMBody(m.grid, m.lastGood.FrameEvent, m.minSamples)
+		body = stream.BLMBodyExplained(m.grid, m.lastGood.FrameEvent, m.minSamples)
 	case m.active == viewINT:
 		body = stream.INTBody(m.intGrid, m.lastGood.FrameEvent, m.minSamples, m.lastGood.Sensors["integrator"])
 	case m.active == viewO2:
