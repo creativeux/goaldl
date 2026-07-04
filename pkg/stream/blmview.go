@@ -21,7 +21,6 @@ type BLMView struct {
 	Grid      *blm.Grid
 	title     string
 	minCount  int // samples before a cell is trusted (shown solid vs dim)
-	recorded  int
 	lastLines int
 }
 
@@ -36,17 +35,15 @@ func NewBLMView(w io.Writer, isTTY bool, title string, minSamples int) *BLMView 
 
 // Render observes one frame: records it if valid, then redraws the grid live.
 func (v *BLMView) Render(ev FrameEvent) {
-	ft := ecm.FuelTrimSample(ev.Frame.Data)
-	ar, ac := -1, -1
-	if ft.Recordable() {
+	if ft := ecm.FuelTrimSample(ev.Frame.Data); ft.Recordable() {
 		v.Grid.Add(ft.RPM, ft.MapKPa, ft.BLM)
-		ar, ac = v.Grid.Cell(ft.RPM, ft.MapKPa)
-		v.recorded++
 	}
 	if !v.isTTY {
 		return // live grid is only meaningful on a terminal
 	}
-	body := v.format(ev, ft, ar, ac)
+	titleLine := fmt.Sprintf("%s   frame %d   t=%.1fs   %d cells ready",
+		v.title, ev.Index, ev.Elapsed.Seconds(), v.Grid.PopulatedCells(v.minCount))
+	body := titleLine + "\n" + BLMBody(v.Grid, ev, v.minCount)
 	if v.lastLines > 0 {
 		fmt.Fprintf(v.w, "\033[%dA", v.lastLines)
 	}
@@ -56,17 +53,25 @@ func (v *BLMView) Render(ev FrameEvent) {
 	v.lastLines = strings.Count(body, "\n") + 1
 }
 
-// format renders the Wide Average grid with the active cell highlighted.
-func (v *BLMView) format(ev FrameEvent, ft ecm.FuelTrim, ar, ac int) string {
-	avg := v.Grid.Average()
-	samples := v.Grid.Samples()
+// BLMBody renders the BLM status line, the Wide-Average grid (active cell
+// reverse-highlighted, cells below minCount dimmed as still-accumulating), and
+// the legend — as a string with no title/frame/time chrome, for embedding in a
+// TUI or the streaming view. It reads the grid but does not modify it.
+func BLMBody(g *blm.Grid, ev FrameEvent, minCount int) string {
+	ft := ecm.FuelTrimSample(ev.Frame.Data)
+	ar, ac := -1, -1
+	if ft.Recordable() {
+		ar, ac = g.Cell(ft.RPM, ft.MapKPa)
+	}
+	avg := g.Average()
+	samples := g.Samples()
 
 	var status string
 	switch {
 	case ft.ClosedLoop && ft.BLMEnabled:
 		prog := ""
 		if ar >= 0 {
-			prog = fmt.Sprintf("  cell %.0f/%d", math.Min(float64(samples[ar][ac]), float64(v.minCount)), v.minCount)
+			prog = fmt.Sprintf("  cell %.0f/%d", math.Min(float64(samples[ar][ac]), float64(minCount)), minCount)
 		}
 		status = fmt.Sprintf("CLOSED LOOP  RPM %.0f  MAP %.0f kPa  BLM %.0f%s", ft.RPM, ft.MapKPa, ft.BLM, prog)
 	case !ft.ClosedLoop:
@@ -76,23 +81,20 @@ func (v *BLMView) format(ev FrameEvent, ft ecm.FuelTrim, ar, ac int) string {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s   frame %d   t=%.1fs   %d cells ready   %s\n",
-		v.title, ev.Index, ev.Elapsed.Seconds(), v.Grid.PopulatedCells(v.minCount), status)
-	// Column header.
+	fmt.Fprintln(&b, status)
 	b.WriteString("  RPM\\MAP")
-	for _, m := range v.Grid.MAP {
+	for _, m := range g.MAP {
 		fmt.Fprintf(&b, " %4.0f", m)
 	}
 	b.WriteByte('\n')
-	for r, rpm := range v.Grid.RPM {
+	for r, rpm := range g.RPM {
 		fmt.Fprintf(&b, "  %5.0f ", rpm)
-		for c := range v.Grid.MAP {
+		for c := range g.MAP {
 			var cellText string
 			switch {
 			case samples[r][c] == 0:
 				cellText = "    ·"
-			case samples[r][c] < v.minCount:
-				// Still accumulating: dim so it reads as provisional.
+			case samples[r][c] < minCount:
 				cellText = fmt.Sprintf("\033[2m%5.0f\033[0m", math.Round(avg[r][c]))
 			default:
 				cellText = fmt.Sprintf("%5.0f", math.Round(avg[r][c]))
@@ -104,6 +106,6 @@ func (v *BLMView) format(ev FrameEvent, ft ecm.FuelTrim, ar, ac int) string {
 		}
 		b.WriteByte('\n')
 	}
-	fmt.Fprintf(&b, "  target 128:  >128 lean, <128 rich;  · = no data, dim = <%d samples", v.minCount)
+	fmt.Fprintf(&b, "  target 128:  >128 lean, <128 rich;  · = no data, dim = <%d samples", minCount)
 	return b.String()
 }

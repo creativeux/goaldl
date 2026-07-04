@@ -27,6 +27,8 @@ func main() {
 		cmdSimulate()
 	case "monitor":
 		cmdMonitor()
+	case "tui":
+		cmdTUI()
 	case "blm":
 		cmdBLM()
 	case "ports":
@@ -47,6 +49,7 @@ func printUsage() {
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  record             Capture raw UART bytes to a file (no processing)")
+	fmt.Println("  tui                Interactive dashboard: navigate sensors / BLM / raw, live or replay")
 	fmt.Println("  monitor            Live sensor table from a port (-p) or a replayed capture file")
 	fmt.Println("  decode             Decode a capture file to frames + optional CSV")
 	fmt.Println("  blm                Build a BLM fuel-trim table (rich/lean by RPM and load) from a capture")
@@ -57,6 +60,7 @@ func printUsage() {
 	fmt.Println("Examples:")
 	fmt.Println("  goaldl ports")
 	fmt.Println("  goaldl record -p /dev/cu.usbserial-10 -t 60 -o session.raw")
+	fmt.Println("  goaldl tui pkg/decoder/testdata/drive_4800.raw              # interactive dashboard")
 	fmt.Println("  goaldl monitor pkg/decoder/testdata/drive_4800.raw          # replay as a live table")
 	fmt.Println("  goaldl monitor -p /dev/cu.usbserial-10 -o session.raw -csv live.csv  # live table + record + log")
 	fmt.Println("  goaldl decode session.raw -o frames.csv                     # batch decode + export")

@@ -122,19 +122,27 @@ func NewRenderer(w io.Writer, isTTY bool, registry *ecm.Registry, ecmPart string
 // Render draws the table for one frame event. On a TTY it moves the cursor
 // back up over the previous table and overwrites it; otherwise it prints each
 // frame as a fresh block.
-func (r *Renderer) Render(ev FrameEvent) {
-	data, err := r.registry.ParseFrame(&aldl.Frame{Data: ev.Frame.Data}, r.ecmPart)
-	var rows []Row
-	def, _ := r.registry.GetDefinition(r.ecmPart)
-	if err == nil {
-		rows = BuildRows(ev.Frame.Data, def, data.ParsedValues)
-	} else {
-		rows = BuildRows(ev.Frame.Data, def, map[string]float64{})
+// rowsFor parses a frame and builds its sensor rows, leaving values blank on a
+// parse error. Shared by the streaming Renderer and SensorTable.
+func rowsFor(ev FrameEvent, registry *ecm.Registry, ecmPart string) []Row {
+	def, _ := registry.GetDefinition(ecmPart)
+	parsed := map[string]float64{}
+	if data, err := registry.ParseFrame(&aldl.Frame{Data: ev.Frame.Data}, ecmPart); err == nil {
+		parsed = data.ParsedValues
 	}
+	return BuildRows(ev.Frame.Data, def, parsed)
+}
 
+// SensorTable renders one frame's sensor/raw/value table as a string, with no
+// terminal control codes — for embedding in a TUI or other presenter.
+func SensorTable(ev FrameEvent, registry *ecm.Registry, ecmPart string) string {
+	return renderTable(rowsFor(ev, registry, ecmPart))
+}
+
+func (r *Renderer) Render(ev FrameEvent) {
 	header := fmt.Sprintf("%s   frame %d   t=%.1fs   %s",
 		r.title, ev.Index, ev.Elapsed.Seconds(), r.promMark(ev.Frame.Data))
-	body := header + "\n" + renderTable(rows)
+	body := header + "\n" + renderTable(rowsFor(ev, r.registry, r.ecmPart))
 
 	if r.isTTY {
 		if r.lastLines > 0 {

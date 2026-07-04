@@ -32,6 +32,10 @@ go run ./cmd/goaldl        # or run directly; prints available commands
 ## Commands
 
 ```bash
+# Interactive dashboard — tab between sensors / BLM grid / raw (live or replay)
+goaldl tui -p /dev/cu.usbserial-10
+goaldl tui drive_4800.raw            # replay a capture
+
 # Find the adapter (the device name drifts — check before using -p)
 goaldl ports
 
