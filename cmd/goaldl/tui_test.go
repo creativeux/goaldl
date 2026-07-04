@@ -2,8 +2,11 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -21,6 +24,10 @@ func testModel() tuiModel {
 		source:     "test",
 		cancel:     func() {},
 		grid:       blm.NewDefault(),
+		intGrid:    blm.NewDefault(),
+		o2Grid:     blm.NewDefault(),
+		mins:       map[string]float64{},
+		maxs:       map[string]float64{},
 	}
 }
 
@@ -119,17 +126,18 @@ func TestTUITabSwitching(t *testing.T) {
 		want view
 	}{
 		{runes('2'), viewBLM},
-		{runes('3'), viewFlags},
-		{runes('4'), viewCodes},
-		{runes('5'), viewRaw},
+		{runes('3'), viewINT},
+		{runes('4'), viewO2},
+		{runes('5'), viewFlags},
+		{runes('6'), viewCodes},
+		{runes('7'), viewRaw},
 		{runes('1'), viewSensors},
-		{tea.KeyMsg{Type: tea.KeyTab}, viewBLM},        // cycle forward
-		{tea.KeyMsg{Type: tea.KeyTab}, viewFlags},      //
-		{tea.KeyMsg{Type: tea.KeyTab}, viewCodes},      //
-		{tea.KeyMsg{Type: tea.KeyTab}, viewRaw},        //
-		{tea.KeyMsg{Type: tea.KeyTab}, viewSensors},    // wraps
-		{tea.KeyMsg{Type: tea.KeyShiftTab}, viewRaw},   // cycle back, wraps
-		{tea.KeyMsg{Type: tea.KeyShiftTab}, viewCodes}, //
+		{tea.KeyMsg{Type: tea.KeyTab}, viewBLM},      // cycle forward
+		{tea.KeyMsg{Type: tea.KeyTab}, viewINT},      //
+		{tea.KeyMsg{Type: tea.KeyTab}, viewO2},       //
+		{tea.KeyMsg{Type: tea.KeyShiftTab}, viewINT}, // cycle back
+		{runes('1'), viewSensors},
+		{tea.KeyMsg{Type: tea.KeyShiftTab}, viewRaw}, // wraps backward
 	}
 	var cur tea.Model = m
 	for i, s := range steps {
@@ -233,13 +241,23 @@ func TestTUIViewPerTab(t *testing.T) {
 
 	// Header always shows the tab bar and source; footer the heartbeat counts.
 	v := mm.View()
-	for _, want := range []string{"Sensors", "BLM grid", "Flags", "Codes", "Raw", "test", "PROM ✓", "1 ok / 0 bad"} {
+	for _, want := range []string{"Sensors", "BLM", "INT", "O2", "Flags", "Codes", "Raw", "test", "PROM ✓", "1 ok / 0 bad"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("sensors view missing %q", want)
 		}
 	}
+	// The persistent loop-status line shows on every tab (recordable frame → closed).
+	if !strings.Contains(v, "CLOSED LOOP") {
+		t.Error("view should show the persistent loop-status line")
+	}
 	if !strings.Contains(v, "Engine speed") {
 		t.Error("sensors view should render the sensor table")
+	}
+	// Sensor tab now carries MIN/MAX columns (always-on).
+	for _, want := range []string{"MIN", "MAX"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("sensors view missing %q column", want)
+		}
 	}
 	// Dual-unit Alt column: MAP byte 99 → (99+28.06)/2.71 ≈ 46.89 kPa.
 	if !strings.Contains(v, "46.89 kPa") {
@@ -273,5 +291,175 @@ func TestTUIViewPerTab(t *testing.T) {
 		if !strings.Contains(rv, want) {
 			t.Errorf("raw view missing %q", want)
 		}
+	}
+}
+
+// TestTUIGridAccumulation: a closed-loop frame feeds all three grids and the
+// extrema; an open-loop frame still feeds O2 (ungated) but not BLM/INT.
+func TestTUIGridAccumulation(t *testing.T) {
+	m := testModel()
+	next, _ := m.Update(snapshotMsg(recordableSnapshot()))
+	mm := next.(tuiModel)
+
+	if mm.grid.TotalSamples() != 1 {
+		t.Errorf("BLM grid = %d, want 1", mm.grid.TotalSamples())
+	}
+	if mm.intGrid.TotalSamples() != 1 {
+		t.Errorf("INT grid = %d, want 1 (closed loop)", mm.intGrid.TotalSamples())
+	}
+	if mm.o2Grid.TotalSamples() != 1 {
+		t.Errorf("O2 grid = %d, want 1 (ungated)", mm.o2Grid.TotalSamples())
+	}
+	if !mm.hasExtrema || len(mm.mins) == 0 {
+		t.Error("extrema should be populated after a parseable frame")
+	}
+
+	// Open-loop frame (MWAF1=0): O2 keeps accumulating; BLM/INT freeze.
+	f := recordableSnapshot()
+	f.Frame.Data[14] = 0
+	f.FuelTrim = ecm.FuelTrimSample(f.Frame.Data)
+	f.Sensors, _ = mm.def.Parse(f.Frame.Data)
+	next2, _ := mm.Update(snapshotMsg(f))
+	mm2 := next2.(tuiModel)
+	if mm2.grid.TotalSamples() != 1 || mm2.intGrid.TotalSamples() != 1 {
+		t.Errorf("open loop: BLM=%d INT=%d, want 1/1 (frozen)", mm2.grid.TotalSamples(), mm2.intGrid.TotalSamples())
+	}
+	if mm2.o2Grid.TotalSamples() != 2 {
+		t.Errorf("open loop: O2=%d, want 2 (ungated)", mm2.o2Grid.TotalSamples())
+	}
+}
+
+// TestTUIClearIsolation: `c` clears only the active grid; on the sensor tab it
+// resets the extrema.
+func TestTUIClearIsolation(t *testing.T) {
+	m := testModel()
+	next, _ := m.Update(snapshotMsg(recordableSnapshot()))
+	mm := next.(tuiModel)
+
+	// Clear on the INT tab wipes INT only.
+	mm.active = viewINT
+	next2, _ := mm.Update(runes('c'))
+	mm2 := next2.(tuiModel)
+	if mm2.intGrid.TotalSamples() != 0 {
+		t.Errorf("INT grid = %d after clear, want 0", mm2.intGrid.TotalSamples())
+	}
+	if mm2.grid.TotalSamples() != 1 || mm2.o2Grid.TotalSamples() != 1 {
+		t.Errorf("clear INT should not touch BLM(%d)/O2(%d)", mm2.grid.TotalSamples(), mm2.o2Grid.TotalSamples())
+	}
+	if !strings.Contains(mm2.notice, "cleared INT") {
+		t.Errorf("notice = %q, want cleared INT", mm2.notice)
+	}
+
+	// Clear on the sensor tab resets extrema.
+	mm2.active = viewSensors
+	next3, _ := mm2.Update(runes('c'))
+	mm3 := next3.(tuiModel)
+	if mm3.hasExtrema || len(mm3.mins) != 0 {
+		t.Error("sensor-tab clear should reset extrema")
+	}
+}
+
+// TestSaveGrids: writes three files; BLM/INT carry a correction table, O2 does
+// not (it is a voltage).
+func TestSaveGrids(t *testing.T) {
+	m := testModel()
+	next, _ := m.Update(snapshotMsg(recordableSnapshot()))
+	mm := next.(tuiModel)
+
+	dir := t.TempDir()
+	ts := time.Date(2026, 7, 4, 14, 30, 22, 0, time.UTC)
+	base, err := saveGrids(dir, ts, mm.grid, mm.intGrid, mm.o2Grid, mm.minSamples)
+	if err != nil {
+		t.Fatalf("saveGrids: %v", err)
+	}
+	if base != "goaldl_20260704_143022" {
+		t.Errorf("base = %q, want goaldl_20260704_143022", base)
+	}
+
+	read := func(suffix string) string {
+		b, err := os.ReadFile(filepath.Join(dir, base+"_"+suffix+".txt"))
+		if err != nil {
+			t.Fatalf("read %s: %v", suffix, err)
+		}
+		return string(b)
+	}
+	for _, s := range []string{"BLM", "INT"} {
+		c := read(s)
+		if !strings.Contains(c, "Samples") || !strings.Contains(c, "Wide Average "+s) || !strings.Contains(c, "Correction factor") {
+			t.Errorf("%s file missing Samples/Average/Correction:\n%s", s, c)
+		}
+	}
+	o2 := read("O2")
+	if !strings.Contains(o2, "Wide Average O2 (volts)") {
+		t.Errorf("O2 file missing average:\n%s", o2)
+	}
+	if strings.Contains(o2, "Correction") {
+		t.Errorf("O2 file should have no correction table:\n%s", o2)
+	}
+}
+
+// TestTUIDriveFixtureEndToEnd drives the full real drive capture through a
+// Session into the dashboard model, exercising the accumulation path over every
+// frame. The BLM count must match the `blm` command's 469 (shared gating),
+// INT (closed-loop only) must exceed it, O2 (ungated) must exceed INT, and all
+// seven tabs must render without panic.
+func TestTUIDriveFixtureEndToEnd(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "pkg", "decoder", "testdata", "drive_4800.raw"))
+	if err != nil {
+		t.Fatalf("reading fixture: %v", err)
+	}
+	registry := ecm.NewRegistry()
+	provider := &stream.ReplayProvider{Data: raw, Config: decoder.DefaultConfig(), Speed: 0}
+	session := stream.NewSession(provider, registry, "1227747", 6291)
+
+	var cur tea.Model = testModel()
+	if err := session.Run(t.Context(), func(s stream.Snapshot) {
+		cur, _ = cur.Update(snapshotMsg(s))
+	}); err != nil {
+		t.Fatalf("session run: %v", err)
+	}
+	mm := cur.(tuiModel)
+
+	if mm.grid.TotalSamples() != 469 {
+		t.Errorf("BLM grid = %d, want 469 (matches the blm command)", mm.grid.TotalSamples())
+	}
+	if mm.intGrid.TotalSamples() <= mm.grid.TotalSamples() {
+		t.Errorf("INT grid = %d, want > BLM %d (closed-loop is a looser gate)", mm.intGrid.TotalSamples(), mm.grid.TotalSamples())
+	}
+	if mm.o2Grid.TotalSamples() < mm.intGrid.TotalSamples() {
+		t.Errorf("O2 grid = %d, want >= INT %d (ungated)", mm.o2Grid.TotalSamples(), mm.intGrid.TotalSamples())
+	}
+	if !mm.hasExtrema {
+		t.Error("extrema should be populated after the drive")
+	}
+
+	// Every tab renders (loop line is always present).
+	for v := view(0); v < viewCount; v++ {
+		mm.active = v
+		out := mm.View()
+		if !strings.Contains(out, "LOOP") {
+			t.Errorf("tab %d missing the persistent loop-status line", v)
+		}
+	}
+}
+
+// TestTUILoopLineHoldsLastGood: the persistent loop line reflects the last
+// parseable frame and does not flicker on a following bad frame.
+func TestTUILoopLineHoldsLastGood(t *testing.T) {
+	m := testModel()
+	next, _ := m.Update(snapshotMsg(recordableSnapshot())) // closed loop
+	mm := next.(tuiModel)
+	if !strings.Contains(mm.loopStatusLine(), "CLOSED LOOP") {
+		t.Errorf("loop line = %q, want CLOSED LOOP", mm.loopStatusLine())
+	}
+
+	bad := stream.Snapshot{
+		FrameEvent: stream.FrameEvent{Frame: decoder.Frame{Data: []byte{0xDE, 0xAD}}, Index: 1},
+		ParseOK:    false,
+	}
+	next2, _ := mm.Update(snapshotMsg(bad))
+	mm2 := next2.(tuiModel)
+	if !strings.Contains(mm2.loopStatusLine(), "CLOSED LOOP") {
+		t.Errorf("after bad frame loop line = %q, want held CLOSED LOOP", mm2.loopStatusLine())
 	}
 }

@@ -46,8 +46,8 @@ Key boundaries:
 -   [x] Core Session/Snapshot API refactor (branch `feat/tui-session-api`)
 -   [ ] **Epic: WinALDL parity** (spec: `specs/2026-07-04_feature_winaldl-parity/`) — delta documented (D1–D16), 4-phase plan; **MVP = Phase 1 agreed 2026-07-04**
     -   [x] Feature: Phase 1 diagnose parity (MVP) — flags/codes/knock parsed as ecm data tables onto Snapshot; 5 TUI tabs (Sensors/BLM/Flags/Codes/Raw history); dual-unit sensor table (TPS% with -tps0/-tps100, MAP kPa); heartbeat + ParseOK gating. Implemented + verified 2026-07-04.
-    -   [ ] Feature: Phase 2 tune parity (INT/O2 grids, in-TUI save/clear, Max/Min) — planned, next up
-    -   [ ] Feature: Phase 3 session UX (recording toggle, replay pause/speed keys, spark grid, CSV toggle) — subsumes prior "Dashboard:" backlog line
+    -   [x] Feature: Phase 2 tune parity (INT/O2 grids, in-TUI save/clear, always-on Min/Max, persistent loop-status chrome) — **shipped + verified 2026-07-04** ([spec-phase2.md](../../specs/2026-07-04_feature_winaldl-parity/spec-phase2.md), [evaluation.md](../../specs/2026-07-04_feature_winaldl-parity/evaluation.md) PASS). Tabs regrouped to Sensors·BLM·INT·O2·Flags·Codes·Raw (keys 1–7); `s` saves all 3 grids, `c` context-clears; consumer-side accumulation only (no Snapshot/Session/blm/ecm change; decode path untouched, goldens byte-identical)
+    -   [ ] Feature: Phase 3 session UX (recording toggle, replay pause/speed keys, spark grid, CSV toggle) — **next up**; subsumes prior "Dashboard:" backlog line
 -   [ ] `serve` adapter (HTTP/WebSocket) proving the Session API drives a non-terminal front-end
 
 ### 2. Backlog / Upcoming
@@ -75,6 +75,9 @@ Key boundaries:
 - Standard Go tooling only (gofmt/vet/test -race), no extra linters — Confidence: Medium (may be by omission)
 
 ## Recent Changes
+- 2026-07-04: **WinALDL parity Phase 2 (Tune) verified & closed** — fresh-context evaluator returned PASS ([evaluation.md](../../specs/2026-07-04_feature_winaldl-parity/evaluation.md)): all 8 acceptance criteria + 5 standards + 2 core philosophies met, forbidden packages untouched, goldens byte-identical, `blm` still 469. One non-blocking note fixed (saved `goaldl_*.txt` grids added to `.gitignore`); spec reconciled (INTBody/O2Body value params, `writeTrimGridFile` name). ROADMAP + CLAUDE.md (7-tab dashboard) updated.
+- 2026-07-04: **WinALDL parity Phase 2 (Tune) implemented** — INT + O2 grid tabs (blm.Grid reuse; INT closed-loop gated, O2 ungated 2-dec live/3-dec saved), always-on sensor MIN/MAX columns, in-TUI `s` save-all-grids / `c` context-clear, and a persistent loop-status line on every tab (green closed / amber open + per-grid ●/○ recording dots). Presentation + consumer-side accumulation only — no Snapshot/Session/blm/ecm change; decoder goldens byte-identical. New `pkg/stream/gridviews.go`; `tui.go` regrouped to 7 tabs. Full suite green under `-race`; end-to-end drive-fixture test cross-checks BLM==469 vs the blm command. Trace: `specs/2026-07-04_feature_winaldl-parity/`.
+- 2026-07-04: **WinALDL parity Phase 2 (Tune) spec'd** — `spec-phase2.md` + persona review (PM/Architect/QA all approve) + pre-implementation standards gate (PROCEED). Key finding: Phase 2 is presentation + consumer-side accumulation only — no `Snapshot`/`Session`/`pkg/blm`/`pkg/ecm` change, decode path untouched.
 - 2026-07-04: **WinALDL parity Phase 1 (MVP) shipped** — flags/error-codes/knock decoded as ecm data tables (A033.ads-verified bit order), Snapshot carries Flags/Codes, TUI grew to 5 tabs (Flags, Codes, scrolling Raw history) + heartbeat/gating, sensor table dual-unit (TPS%, MAP kPa). `MapVoltsToKPa` corrected to the WinALDL-verified transfer. Spec trace: `specs/2026-07-04_feature_winaldl-parity/`.
 - 2026-07-04: Adopted into GLaDOS framework (SDA v1.0); standards/philosophies extracted from CLAUDE.md and code.
 - 2026-07-03: Refactor to core Session API; TUI dashboard as default face; PR review fixes (branch `feat/tui-session-api`).
