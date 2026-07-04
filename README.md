@@ -1,5 +1,7 @@
 # goaldl
 
+[![CI](https://github.com/creativeux/goaldl/actions/workflows/ci.yml/badge.svg)](https://github.com/creativeux/goaldl/actions/workflows/ci.yml)
+
 A cross-platform Go scanner and datalogger for GM's 160-baud ALDL (Assembly
 Line Diagnostic Link) protocol — the pre-OBD2 diagnostic stream used by GM
 ECMs. Primary target: the **GM 1227747** (A033 TBI, '86–'88 4.3/5.0/5.7L).
