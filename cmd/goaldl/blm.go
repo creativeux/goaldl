@@ -3,12 +3,33 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"goaldl/pkg/blm"
 	"goaldl/pkg/decoder"
 	"goaldl/pkg/ecm"
 )
+
+// accumulateBLM bins the recordable frames into a fresh grid and reports how
+// many frames were skipped because the ECM was in open loop or had block learn
+// disabled (BLM is frozen and meaningless in those states). Pure and
+// side-effect-free so it can be tested against a capture fixture.
+func accumulateBLM(frames []decoder.Frame) (grid *blm.Grid, openLoop, blmOff int) {
+	grid = blm.NewDefault()
+	for _, f := range frames {
+		ft := ecm.FuelTrimSample(f.Data)
+		switch {
+		case !ft.ClosedLoop:
+			openLoop++
+		case !ft.BLMEnabled:
+			blmOff++
+		default:
+			grid.Add(ft.RPM, ft.MapKPa, ft.BLM)
+		}
+	}
+	return grid, openLoop, blmOff
+}
 
 // cmdBLM builds a BLM (fuel-trim) table from a capture, showing where the tune
 // runs rich or lean across RPM and load. It records every closed-loop,
@@ -43,19 +64,7 @@ func cmdBLM() {
 		os.Exit(1)
 	}
 
-	grid := blm.NewDefault()
-	var openLoop, blmOff int
-	for _, f := range frames {
-		ft := ecm.FuelTrimSample(f.Data)
-		switch {
-		case !ft.ClosedLoop:
-			openLoop++
-		case !ft.BLMEnabled:
-			blmOff++
-		default:
-			grid.Add(ft.RPM, ft.MapKPa, ft.BLM)
-		}
-	}
+	grid, openLoop, blmOff := accumulateBLM(frames)
 
 	fmt.Printf("Decoded %d frames from %s\n", len(frames), inName)
 	fmt.Printf("Recorded %d into BLM cells (skipped %d open-loop, %d block-learn-disabled)\n\n",
@@ -78,7 +87,13 @@ func cmdBLM() {
 	fmt.Print(grid.RenderFloat("", grid.CorrectionAtLeast(*minSamples), 3))
 
 	if *csvOut != "" {
-		if err := writeCorrectionCSV(*csvOut, grid, *minSamples); err != nil {
+		f, err := os.Create(*csvOut)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating %s: %v\n", *csvOut, err)
+			os.Exit(1)
+		}
+		writeCorrectionCSV(f, grid, *minSamples)
+		if err := f.Close(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", *csvOut, err)
 			os.Exit(1)
 		}
@@ -86,24 +101,20 @@ func cmdBLM() {
 	}
 }
 
-func writeCorrectionCSV(path string, g *blm.Grid, minSamples int) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
+// writeCorrectionCSV writes the correction grid as CSV (RPM rows, MAP columns),
+// with cells below minSamples held at 1.000.
+func writeCorrectionCSV(w io.Writer, g *blm.Grid, minSamples int) {
 	corr := g.CorrectionAtLeast(minSamples)
-	fmt.Fprint(f, "rpm\\map")
+	fmt.Fprint(w, "rpm\\map")
 	for _, m := range g.MAP {
-		fmt.Fprintf(f, ",%g", m)
+		fmt.Fprintf(w, ",%g", m)
 	}
-	fmt.Fprintln(f)
+	fmt.Fprintln(w)
 	for r, rpm := range g.RPM {
-		fmt.Fprintf(f, "%g", rpm)
+		fmt.Fprintf(w, "%g", rpm)
 		for c := range g.MAP {
-			fmt.Fprintf(f, ",%.3f", corr[r][c])
+			fmt.Fprintf(w, ",%.3f", corr[r][c])
 		}
-		fmt.Fprintln(f)
+		fmt.Fprintln(w)
 	}
-	return nil
 }

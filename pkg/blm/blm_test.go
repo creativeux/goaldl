@@ -77,6 +77,74 @@ func TestClampsOutOfRange(t *testing.T) {
 	}
 }
 
+func TestCorrectionAtLeast(t *testing.T) {
+	g := NewDefault()
+	// Cell A: 4 samples averaging 116 -> trusted, correction 116/128 = 0.90625.
+	for i := 0; i < 4; i++ {
+		g.Add(1600, 40, 116)
+	}
+	// Cell B: 2 samples -> below default threshold -> held at 1.0.
+	g.Add(2000, 50, 100)
+	g.Add(2000, 50, 100)
+
+	corr := g.CorrectionAtLeast(4)
+	if got := corr[idx(g.RPM, 1600)][idx(g.MAP, 40)]; math.Abs(got-0.90625) > 1e-9 {
+		t.Errorf("trusted cell correction = %.5f, want 0.90625", got)
+	}
+	if got := corr[idx(g.RPM, 2000)][idx(g.MAP, 50)]; got != 1.0 {
+		t.Errorf("below-threshold cell correction = %v, want 1.0 (held)", got)
+	}
+	// A lower threshold trusts cell B and applies its correction (100/128).
+	corr3 := g.CorrectionAtLeast(2)
+	if got := corr3[idx(g.RPM, 2000)][idx(g.MAP, 50)]; math.Abs(got-100.0/128.0) > 1e-9 {
+		t.Errorf("cell B at min=2 correction = %.5f, want %.5f", got, 100.0/128.0)
+	}
+}
+
+func TestPopulatedCells(t *testing.T) {
+	g := NewDefault()
+	for i := 0; i < 4; i++ {
+		g.Add(1600, 40, 116) // reaches 4
+	}
+	g.Add(2000, 50, 120) // only 1
+	g.Add(2000, 50, 120) // 2
+	g.Add(2000, 50, 120) // 3
+
+	if got := g.PopulatedCells(4); got != 1 {
+		t.Errorf("PopulatedCells(4) = %d, want 1", got)
+	}
+	if got := g.PopulatedCells(3); got != 2 {
+		t.Errorf("PopulatedCells(3) = %d, want 2", got)
+	}
+	if got := g.PopulatedCells(1); got != 2 {
+		t.Errorf("PopulatedCells(1) = %d, want 2 (distinct cells touched)", got)
+	}
+}
+
+func TestRenderInt(t *testing.T) {
+	g := NewDefault()
+	g.Add(800, 40, 110)
+	g.Add(800, 40, 112)
+	out := g.RenderInt("Samples", g.Samples())
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if lines[0] != "Samples" {
+		t.Errorf("title = %q", lines[0])
+	}
+	if !strings.HasPrefix(lines[1], "RPM \\ MAP\t20\t30") {
+		t.Errorf("header = %q", lines[1])
+	}
+	// The 800/40 cell shows 2; find that row and check the 40-column value.
+	var row800 string
+	for _, l := range lines {
+		if strings.HasPrefix(l, "800\t") {
+			row800 = l
+		}
+	}
+	if fields := strings.Split(row800, "\t"); fields[3] != "2" { // rpm,20,30,40 -> index 3
+		t.Errorf("800/40 sample count = %q, want 2 (row %q)", fields[3], row800)
+	}
+}
+
 func TestRenderShape(t *testing.T) {
 	g := NewDefault()
 	g.Add(800, 40, 110)
