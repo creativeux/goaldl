@@ -2,6 +2,9 @@
 *.exe
 /goaldl
 
+# JetBrains IDE files
+/.idea/
+
 # Transient working captures and their derived outputs at repo root.
 # Canonical test fixtures live in pkg/decoder/testdata/ instead.
 /*.raw
