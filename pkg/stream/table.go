@@ -141,7 +141,7 @@ func (r *Renderer) Render(ev FrameEvent) {
 			fmt.Fprintf(r.w, "\033[%dA", r.lastLines) // cursor up over previous render
 		}
 		// Clear each line as we rewrite so shorter content can't leave artifacts.
-		for _, line := range strings.Split(body, "\n") {
+		for line := range strings.SplitSeq(body, "\n") {
 			fmt.Fprintf(r.w, "\033[2K%s\n", line)
 		}
 		r.lastLines = strings.Count(body, "\n") + 1

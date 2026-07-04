@@ -46,18 +46,18 @@ func (v *BLMView) Render(ev FrameEvent) {
 	if !v.isTTY {
 		return // live grid is only meaningful on a terminal
 	}
-	body := v.format(ft, ar, ac)
+	body := v.format(ev, ft, ar, ac)
 	if v.lastLines > 0 {
 		fmt.Fprintf(v.w, "\033[%dA", v.lastLines)
 	}
-	for _, line := range strings.Split(body, "\n") {
+	for line := range strings.SplitSeq(body, "\n") {
 		fmt.Fprintf(v.w, "\033[2K%s\n", line)
 	}
 	v.lastLines = strings.Count(body, "\n") + 1
 }
 
 // format renders the Wide Average grid with the active cell highlighted.
-func (v *BLMView) format(ft ecm.FuelTrim, ar, ac int) string {
+func (v *BLMView) format(ev FrameEvent, ft ecm.FuelTrim, ar, ac int) string {
 	avg := v.Grid.Average()
 	samples := v.Grid.Samples()
 
@@ -76,7 +76,8 @@ func (v *BLMView) format(ft ecm.FuelTrim, ar, ac int) string {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s   %d cells ready   %s\n", v.title, v.Grid.PopulatedCells(v.minCount), status)
+	fmt.Fprintf(&b, "%s   frame %d   t=%.1fs   %d cells ready   %s\n",
+		v.title, ev.Index, ev.Elapsed.Seconds(), v.Grid.PopulatedCells(v.minCount), status)
 	// Column header.
 	b.WriteString("  RPM\\MAP")
 	for _, m := range v.Grid.MAP {
