@@ -1,0 +1,24 @@
+# GLaDOS standards index
+standards:
+  - path: decoder/byte-value-decoding.md
+    area: decoder
+    summary: Decode ALDL from UART byte values only — never host-side timing.
+  - path: decoder/raw-data-policy.md
+    area: decoder
+    summary: No plausibility filtering in the decode path; quality signals ride alongside as fields.
+  - path: testing/golden-fixtures.md
+    area: testing
+    summary: Test suite rooted in real-hardware captures with golden frame dumps; -update is deliberate.
+  - path: architecture/session-api-layering.md
+    area: architecture
+    summary: Front-ends consume stream.Session/Snapshot; layering boundaries between decoder/ecm/blm/stream.
+  - path: go/tooling.md
+    area: go
+    summary: gofmt + vet + build + test -race is the whole gate; minimal dependencies.
+reference:
+  - path: sda-standard-v1.md
+    area: sda
+    summary: SDA Standard v1.0 (tool-agnostic format reference).
+  - path: sda-profile-glados-v1.md
+    area: sda
+    summary: GLaDOS profile of the SDA standard.
