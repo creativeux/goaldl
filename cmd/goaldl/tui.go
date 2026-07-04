@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -22,8 +23,31 @@ import (
 //
 //	goaldl -p /dev/cu.usbserial-10
 //	goaldl drive_4800.raw [-speed 2]
-func cmdTUI(args []string) {
-	fs := flag.NewFlagSet("goaldl", flag.ExitOnError)
+// errNoTUISource signals that neither a port nor a capture file was given, so
+// cmdTUI can print its detailed source-selection help.
+var errNoTUISource = errors.New("no source")
+
+// tuiFlags is the fully-resolved dashboard configuration after the two-stage
+// parse (flags may trail the capture filename). It is plain data so the
+// parse-and-resolve step can be unit-tested without launching the TUI.
+type tuiFlags struct {
+	cfg        decoder.Config
+	registry   *ecm.Registry
+	def        *ecm.Definition // TPS-calibrated copy
+	ecmPart    string
+	promID     int
+	minSamples int
+	portName   string
+	inName     string // capture file (empty for live)
+	speed      float64
+}
+
+// resolveTUIFlags parses the dashboard flags, honouring flags that trail the
+// capture filename (`goaldl drive.raw -tps0 0.5 -e <part>`). Every flag value
+// is read only after the trailing re-parse, so post-filename flags are not
+// silently dropped. Returns errNoTUISource when no port/file is given.
+func resolveTUIFlags(args []string) (*tuiFlags, error) {
+	fs := flag.NewFlagSet("goaldl", flag.ContinueOnError)
 	portName := fs.String("p", "", "Live: serial port to read from (omit to replay a file)")
 	baudRate := fs.Int("b", 4800, "UART sampling baud rate")
 	ecmPart := fs.String("e", defaultECM, "ECM part number")
@@ -33,45 +57,79 @@ func cmdTUI(args []string) {
 	tps0 := fs.Float64("tps0", ecm.DefaultTPS0, "TPS calibration: volts at 0% throttle")
 	tps100 := fs.Float64("tps100", ecm.DefaultTPS100, "TPS calibration: volts at 100% throttle")
 	speed := fs.Float64("speed", 1.0, "Replay only: playback speed (1=real time, 0=as fast as possible)")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
 
-	cfg := decoder.Config{BaudRate: *baudRate, FrameSize: 20, SyncBits: 9, Invert: *invert}
+	// Resolve the capture filename (if any) and re-parse flags that trail it.
+	// This must happen before any flag value is read below — otherwise trailing
+	// flags would be silently ignored (defaults applied) for everything below.
+	var inName string
+	if *portName == "" {
+		if fs.NArg() < 1 {
+			return nil, errNoTUISource
+		}
+		inName = fs.Arg(0)
+		if err := fs.Parse(fs.Args()[1:]); err != nil { // allow flags after the filename
+			return nil, err
+		}
+	}
+
 	registry := ecm.NewRegistry()
 	def, ok := registry.GetDefinition(*ecmPart)
 	if !ok {
-		fmt.Fprintf(os.Stderr, "Unknown ECM: %s\n", *ecmPart)
-		os.Exit(1)
+		return nil, fmt.Errorf("unknown ECM: %s", *ecmPart)
 	}
 	def = calibratedDef(def, *tps0, *tps100)
 
-	var provider stream.Provider
-	if *portName != "" {
-		provider = &stream.SerialProvider{Port: *portName, Baud: *baudRate, Config: cfg}
-	} else {
-		if fs.NArg() < 1 {
+	return &tuiFlags{
+		cfg:        decoder.Config{BaudRate: *baudRate, FrameSize: 20, SyncBits: 9, Invert: *invert},
+		registry:   registry,
+		def:        def,
+		ecmPart:    *ecmPart,
+		promID:     *promID,
+		minSamples: *minSamples,
+		portName:   *portName,
+		inName:     inName,
+		speed:      *speed,
+	}, nil
+}
+
+func cmdTUI(args []string) {
+	cfg, err := resolveTUIFlags(args)
+	if err != nil {
+		if errors.Is(err, errNoTUISource) {
 			fmt.Fprintln(os.Stderr, "No source. Give a port or a capture file:")
 			fmt.Fprintln(os.Stderr, "  goaldl -p /dev/cu.usbserial-10")
 			fmt.Fprintln(os.Stderr, "  goaldl drive_4800.raw")
 			fmt.Fprintln(os.Stderr, "\nSee 'goaldl help' for the scripting commands (ports, record, decode, blm, …).")
-			os.Exit(1)
+		} else {
+			fmt.Fprintln(os.Stderr, err)
 		}
-		inName := fs.Arg(0)
-		fs.Parse(fs.Args()[1:]) // allow flags after the filename
-		data, err := os.ReadFile(inName)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", inName, err)
-			os.Exit(1)
-		}
-		provider = &stream.ReplayProvider{Data: data, Config: cfg, Speed: *speed}
+		os.Exit(1)
 	}
 
-	session := stream.NewSession(provider, registry, *ecmPart, *promID)
+	var provider stream.Provider
+	if cfg.portName != "" {
+		provider = &stream.SerialProvider{Port: cfg.portName, Baud: cfg.cfg.BaudRate, Config: cfg.cfg}
+	} else {
+		data, err := os.ReadFile(cfg.inName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", cfg.inName, err)
+			os.Exit(1)
+		}
+		provider = &stream.ReplayProvider{Data: data, Config: cfg.cfg, Speed: cfg.speed}
+	}
+
+	def := cfg.def
+	session := stream.NewSession(provider, cfg.registry, cfg.ecmPart, cfg.promID)
 
 	// Run the session in the background, delivering snapshots over a channel.
 	// The emit blocks on the channel, so the session is paced by the UI.
 	ctx, cancel := context.WithCancel(context.Background())
-	// Small buffer so a briefly-stalled terminal (slow SSH, flow control) can't
-	// block the session goroutine from draining the UART and dropping bytes.
+	// Small buffer to smooth brief UI stalls (slow SSH, flow control). The emit
+	// still blocks once it fills, back-pressuring the provider — the buffer only
+	// buys ~8 frames of slack, it doesn't guarantee the UART keeps draining.
 	snaps := make(chan stream.Snapshot, 8)
 	go func() {
 		session.Run(ctx, func(s stream.Snapshot) {
@@ -85,7 +143,7 @@ func cmdTUI(args []string) {
 
 	m := tuiModel{
 		def:        def,
-		minSamples: *minSamples,
+		minSamples: cfg.minSamples,
 		source:     session.Name(),
 		snaps:      snaps,
 		cancel:     cancel,

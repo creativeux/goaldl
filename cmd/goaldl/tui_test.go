@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -41,6 +42,70 @@ func recordableSnapshot() stream.Snapshot {
 		FuelTrim:   ecm.FuelTrimSample(f),
 		Flags:      ecm.DecodeFlags(def, f),
 		Codes:      ecm.DecodeCodes(def, f),
+	}
+}
+
+// tpsAlt returns the TPS-percent alternate conversion's (Factor, Bias) from a
+// definition — enough to tell a calibrated def apart from the pristine default
+// (AltConversion itself is not comparable: it carries a Lookup).
+func tpsAlt(t *testing.T, def *ecm.Definition) (factor, bias float64) {
+	t.Helper()
+	for _, p := range def.Parameters {
+		if p.Name == "tps_voltage" {
+			if p.Alt == nil {
+				t.Fatal("tps_voltage has no Alt conversion")
+			}
+			return p.Alt.Factor, p.Alt.Bias
+		}
+	}
+	t.Fatal("no tps_voltage parameter")
+	return 0, 0
+}
+
+// Regression: flags that trail the capture filename must be honoured. Before
+// the two-stage-parse fix, resolveTUIFlags read tps0/tps100/ecmPart *before*
+// re-parsing post-filename flags, so `goaldl drive.raw -tps0 …` silently
+// applied the defaults (and `-e` desynced the session from the model).
+func TestResolveTUIFlagsAfterFilename(t *testing.T) {
+	want := ecm.TPSPercentAlt(0.30, 4.50)
+
+	// Flags before the filename already worked; establish the target value.
+	before, err := resolveTUIFlags([]string{"-tps0", "0.30", "-tps100", "4.50", "drive.raw"})
+	if err != nil {
+		t.Fatalf("flags before filename: %v", err)
+	}
+	if f, b := tpsAlt(t, before.def); f != want.Factor || b != want.Bias {
+		t.Fatalf("flags before filename: TPS Alt = (%v, %v), want (%v, %v)", f, b, want.Factor, want.Bias)
+	}
+
+	// The regression case: identical flags placed *after* the filename.
+	after, err := resolveTUIFlags([]string{"drive.raw", "-tps0", "0.30", "-tps100", "4.50"})
+	if err != nil {
+		t.Fatalf("flags after filename: %v", err)
+	}
+	if after.inName != "drive.raw" {
+		t.Fatalf("inName = %q, want drive.raw", after.inName)
+	}
+	if f, b := tpsAlt(t, after.def); f != want.Factor || b != want.Bias {
+		t.Fatalf("flags after filename: TPS Alt = (%v, %v), want (%v, %v) (post-filename flag dropped?)", f, b, want.Factor, want.Bias)
+	}
+}
+
+// The default calibration (no TPS flags) must match the pristine registry def.
+func TestResolveTUIFlagsDefaultCalibration(t *testing.T) {
+	cfg, err := resolveTUIFlags([]string{"drive.raw"})
+	if err != nil {
+		t.Fatalf("resolveTUIFlags: %v", err)
+	}
+	want := ecm.TPSPercentAlt(ecm.DefaultTPS0, ecm.DefaultTPS100)
+	if f, b := tpsAlt(t, cfg.def); f != want.Factor || b != want.Bias {
+		t.Fatalf("default TPS Alt = (%v, %v), want (%v, %v)", f, b, want.Factor, want.Bias)
+	}
+}
+
+func TestResolveTUIFlagsNoSource(t *testing.T) {
+	if _, err := resolveTUIFlags(nil); !errors.Is(err, errNoTUISource) {
+		t.Fatalf("no source: err = %v, want errNoTUISource", err)
 	}
 }
 
