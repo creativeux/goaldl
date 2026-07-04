@@ -10,12 +10,15 @@ import (
 )
 
 // Row is one line of the sensor table: the human-readable sensor name, its raw
-// bytes from the frame, the translated value with unit, and the alternate
-// (dual-unit) value when the parameter defines one.
+// bytes from the frame, the translated value with unit, the per-sensor Min/Max
+// extrema (blank in the 4-column layout), and the alternate (dual-unit) value
+// when the parameter defines one.
 type Row struct {
 	Sensor string
 	Raw    string
 	Value  string
+	Min    string
+	Max    string
 	Alt    string
 }
 
@@ -35,6 +38,34 @@ func BuildRows(frame []byte, def *ecm.Definition, parsed map[string]float64) []R
 		})
 	}
 	return rows
+}
+
+// BuildRowsExtrema is BuildRows plus per-sensor Min/Max columns, pulled from
+// the mins/maxs maps (keyed by parameter Name, primary unit). A parameter
+// absent from the maps renders "—" (no data since the last reset).
+func BuildRowsExtrema(frame []byte, def *ecm.Definition, parsed, mins, maxs map[string]float64) []Row {
+	rows := make([]Row, 0, len(def.Parameters))
+	for _, p := range def.Parameters {
+		rows = append(rows, Row{
+			Sensor: sensorLabel(p),
+			Raw:    formatRaw(frame, p),
+			Value:  formatValue(parsed, p),
+			Min:    formatExtreme(mins, p),
+			Max:    formatExtreme(maxs, p),
+			Alt:    formatAlt(frame, p),
+		})
+	}
+	return rows
+}
+
+// formatExtreme renders one Min/Max cell in the parameter's primary unit, or
+// "—" when no reading has been recorded for it yet.
+func formatExtreme(m map[string]float64, p ecm.Parameter) string {
+	v, ok := m[p.Name]
+	if !ok {
+		return "—"
+	}
+	return formatNum(v, p.Unit)
 }
 
 func sensorLabel(p ecm.Parameter) string {
@@ -159,6 +190,54 @@ func rowsFor(ev FrameEvent, def *ecm.Definition) []Row {
 // no terminal control codes — for embedding in a TUI or other presenter.
 func SensorTable(ev FrameEvent, def *ecm.Definition) string {
 	return renderTable(rowsFor(ev, def))
+}
+
+// SensorTableExtrema renders the 6-column dashboard table
+// (SENSOR·RAW·VALUE·MIN·MAX·ALT), with per-sensor extrema from mins/maxs. When
+// mins is nil it falls back to the 4-column SensorTable, so the monitor path is
+// unchanged.
+func SensorTableExtrema(ev FrameEvent, def *ecm.Definition, mins, maxs map[string]float64) string {
+	if mins == nil {
+		return SensorTable(ev, def)
+	}
+	parsed, err := def.Parse(ev.Frame.Data)
+	if err != nil {
+		parsed = map[string]float64{}
+	}
+	return renderTableExtrema(BuildRowsExtrema(ev.Frame.Data, def, parsed, mins, maxs))
+}
+
+// renderTableExtrema formats rows into the aligned six-column table (no
+// trailing newline on the last line).
+func renderTableExtrema(rows []Row) string {
+	const (
+		hSensor = "SENSOR"
+		hRaw    = "RAW"
+		hValue  = "VALUE"
+		hMin    = "MIN"
+		hMax    = "MAX"
+		hAlt    = "ALT"
+	)
+	wS, wR, wV, wMin, wMax := len(hSensor), len(hRaw), len(hValue), len(hMin), len(hMax)
+	for _, r := range rows {
+		wS = max(wS, len(r.Sensor))
+		wR = max(wR, len(r.Raw))
+		wV = max(wV, len(r.Value))
+		wMin = max(wMin, len(r.Min))
+		wMax = max(wMax, len(r.Max))
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		wS, hSensor, wR, hRaw, wV, hValue, wMin, hMin, wMax, hMax, hAlt)
+	fmt.Fprintf(&b, "%s\n", strings.Repeat("─", wS+wR+wV+wMin+wMax+len(hAlt)+10))
+	for i, r := range rows {
+		fmt.Fprintf(&b, "%-*s  %-*s  %-*s  %-*s  %-*s  %s",
+			wS, r.Sensor, wR, r.Raw, wV, r.Value, wMin, r.Min, wMax, r.Max, r.Alt)
+		if i < len(rows)-1 {
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
 }
 
 // Render draws the table for one frame event. On a TTY it moves the cursor

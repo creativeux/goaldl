@@ -5,7 +5,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -148,6 +152,10 @@ func cmdTUI(args []string) {
 		snaps:      snaps,
 		cancel:     cancel,
 		grid:       blm.NewDefault(),
+		intGrid:    blm.NewDefault(),
+		o2Grid:     blm.NewDefault(),
+		mins:       map[string]float64{},
+		maxs:       map[string]float64{},
 	}
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		cancel()
@@ -173,6 +181,8 @@ type view int
 const (
 	viewSensors view = iota
 	viewBLM
+	viewINT
+	viewO2
 	viewFlags
 	viewCodes
 	viewRaw
@@ -208,7 +218,12 @@ type tuiModel struct {
 	history       [][]byte // raw frames, newest first, capped at rawHistoryCap
 	okCount       int
 	badCount      int
-	grid          *blm.Grid
+	grid          *blm.Grid          // BLM (long-term trim), closed-loop + BLM-enable gated
+	intGrid       *blm.Grid          // INT (short-term trim), closed-loop gated
+	o2Grid        *blm.Grid          // O2 voltage, ungated
+	mins, maxs    map[string]float64 // per-sensor extrema since last reset
+	hasExtrema    bool
+	notice        string // transient footer message after a save/clear
 	frameCount    int
 	done          bool
 }
@@ -242,15 +257,23 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "2":
 			m.active = viewBLM
 		case "3":
-			m.active = viewFlags
+			m.active = viewINT
 		case "4":
-			m.active = viewCodes
+			m.active = viewO2
 		case "5":
+			m.active = viewFlags
+		case "6":
+			m.active = viewCodes
+		case "7":
 			m.active = viewRaw
 		case "tab", "right", "l":
 			m.active = (m.active + 1) % viewCount
 		case "shift+tab", "left", "h":
 			m.active = (m.active + viewCount - 1) % viewCount
+		case "s":
+			m.notice = m.save()
+		case "c":
+			m.notice = m.clear()
 		}
 
 	case snapshotMsg:
@@ -274,9 +297,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.badCount++
 		}
-		if s.FuelTrim.Recordable() {
-			m.grid.Add(s.FuelTrim.RPM, s.FuelTrim.MapKPa, s.FuelTrim.BLM)
-		}
+		m.accumulate(s)
 		return m, m.waitForSnapshot()
 
 	case providerDoneMsg:
@@ -285,16 +306,117 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// accumulate folds one snapshot into the consumer-side grids and per-sensor
+// extrema. BLM gates on closed loop + block-learn enable; INT on closed loop;
+// O2 is ungated. Value-based accumulation (INT/O2/extrema) requires a parseable
+// frame, since it reads the decoded Sensors map.
+func (m *tuiModel) accumulate(s stream.Snapshot) {
+	ft := s.FuelTrim
+	if ft.Recordable() {
+		m.grid.Add(ft.RPM, ft.MapKPa, ft.BLM)
+	}
+	if !s.ParseOK {
+		return
+	}
+	if ft.ClosedLoop {
+		m.intGrid.Add(ft.RPM, ft.MapKPa, s.Sensors["integrator"])
+	}
+	m.o2Grid.Add(ft.RPM, ft.MapKPa, s.Sensors["oxygen_sensor"]/1000.0)
+	for name, v := range s.Sensors {
+		if cur, ok := m.mins[name]; !ok || v < cur {
+			m.mins[name] = v
+		}
+		if cur, ok := m.maxs[name]; !ok || v > cur {
+			m.maxs[name] = v
+		}
+	}
+	m.hasExtrema = true
+}
+
+// save writes all three grids to timestamped files and returns a footer notice.
+func (m *tuiModel) save() string {
+	base, err := saveGrids(".", time.Now(), m.grid, m.intGrid, m.o2Grid, m.minSamples)
+	if err != nil {
+		return "save failed: " + err.Error()
+	}
+	return "saved BLM/INT/O2 → " + base + "_*.txt"
+}
+
+// clear resets state for the active tab: the viewed grid (BLM/INT/O2) or, on the
+// sensor tab, the Min/Max extrema. Other tabs are a no-op (notice unchanged).
+func (m *tuiModel) clear() string {
+	switch m.active {
+	case viewBLM:
+		m.grid = blm.NewDefault()
+		return "cleared BLM grid"
+	case viewINT:
+		m.intGrid = blm.NewDefault()
+		return "cleared INT grid"
+	case viewO2:
+		m.o2Grid = blm.NewDefault()
+		return "cleared O2 grid"
+	case viewSensors:
+		m.mins, m.maxs, m.hasExtrema = map[string]float64{}, map[string]float64{}, false
+		return "reset min/max"
+	}
+	return m.notice
+}
+
+// saveGrids writes the BLM, INT, and O2 grids to three files in dir sharing one
+// timestamp; returns the shared base name ("goaldl_<ts>").
+func saveGrids(dir string, ts time.Time, blmG, intG, o2G *blm.Grid, minSamples int) (string, error) {
+	base := "goaldl_" + ts.Format("20060102_150405")
+	writeOne := func(suffix string, write func(io.Writer)) error {
+		f, err := os.Create(filepath.Join(dir, base+"_"+suffix+".txt"))
+		if err != nil {
+			return err
+		}
+		write(f)
+		return f.Close()
+	}
+	if err := writeOne("BLM", func(w io.Writer) { writeTrimGridFile(w, blmG, "BLM", minSamples) }); err != nil {
+		return base, err
+	}
+	if err := writeOne("INT", func(w io.Writer) { writeTrimGridFile(w, intG, "INT", minSamples) }); err != nil {
+		return base, err
+	}
+	if err := writeOne("O2", func(w io.Writer) { writeO2File(w, o2G) }); err != nil {
+		return base, err
+	}
+	return base, nil
+}
+
+// writeTrimGridFile writes Samples + Wide Average + Correction for a 128-centered
+// trim grid (BLM or INT), matching the `blm` command's file format.
+func writeTrimGridFile(w io.Writer, g *blm.Grid, name string, minSamples int) {
+	fmt.Fprint(w, g.RenderInt("Samples", g.Samples()))
+	fmt.Fprintln(w)
+	fmt.Fprint(w, g.RenderFloat("Wide Average "+name+" (target 128; >128 lean, <128 rich)", g.Average(), 1))
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "Correction factor = avg/128 (cells with <%d samples held at 1.000)\n", minSamples)
+	fmt.Fprint(w, g.RenderFloat("", g.CorrectionAtLeast(minSamples), 3))
+}
+
+// writeO2File writes Samples + Wide Average (volts, 3 decimals). O2 is a
+// voltage, not a trim multiplier, so there is no correction table.
+func writeO2File(w io.Writer, g *blm.Grid) {
+	fmt.Fprint(w, g.RenderInt("Samples", g.Samples()))
+	fmt.Fprintln(w)
+	fmt.Fprint(w, g.RenderFloat("Wide Average O2 (volts)", g.Average(), 3))
+}
+
 var (
 	tabActive   = lipgloss.NewStyle().Bold(true).Reverse(true).Padding(0, 1)
 	tabInactive = lipgloss.NewStyle().Faint(true).Padding(0, 1)
 	dimStyle    = lipgloss.NewStyle().Faint(true)
-	beatOK      = lipgloss.NewStyle().Foreground(lipgloss.Color("2")) // green
-	beatBad     = lipgloss.NewStyle().Foreground(lipgloss.Color("1")) // red
+	beatOK      = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))            // green
+	beatBad     = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))            // red
+	loopClosed  = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true) // green
+	loopOpen    = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true) // amber
 )
 
 func (m tuiModel) View() string {
-	tabs := []string{"1 Sensors", "2 BLM grid", "3 Flags", "4 Codes", "5 Raw"}
+	tabs := []string{"1 Sensors", "2 BLM", "3 INT", "4 O2", "5 Flags", "6 Codes", "7 Raw"}
 	rendered := make([]string, len(tabs))
 	for i, t := range tabs {
 		if view(i) == m.active {
@@ -312,11 +434,15 @@ func (m tuiModel) View() string {
 	case m.active == viewRaw:
 		body = m.rawView()
 	case !m.hasGood:
-		body = dimStyle.Render("\n  waiting for a parseable frame… (see 5 Raw for the byte stream)")
+		body = dimStyle.Render("\n  waiting for a parseable frame… (see 7 Raw for the byte stream)")
 	case m.active == viewSensors:
-		body = stream.SensorTable(m.lastGood.FrameEvent, m.def)
+		body = stream.SensorTableExtrema(m.lastGood.FrameEvent, m.def, m.mins, m.maxs)
 	case m.active == viewBLM:
 		body = stream.BLMBody(m.grid, m.lastGood.FrameEvent, m.minSamples)
+	case m.active == viewINT:
+		body = stream.INTBody(m.intGrid, m.lastGood.FrameEvent, m.minSamples, m.lastGood.Sensors["integrator"])
+	case m.active == viewO2:
+		body = stream.O2Body(m.o2Grid, m.lastGood.FrameEvent, m.lastGood.Sensors["oxygen_sensor"]/1000.0)
 	case m.active == viewFlags:
 		body = stream.FlagsBody(m.lastGood.Flags)
 	case m.active == viewCodes:
@@ -329,9 +455,32 @@ func (m tuiModel) View() string {
 	if m.done {
 		status += "   " + dimStyle.Render("(stream ended)")
 	}
-	footer := status + "   " + dimStyle.Render("1-5/tab switch · q quit")
+	footer := status
+	if m.notice != "" {
+		footer += "   " + m.notice
+	}
+	footer += "   " + dimStyle.Render("1-7/tab · s save · c clear · q quit")
 
-	return header + "\n\n" + body + "\n\n" + footer
+	return header + "\n" + m.loopStatusLine() + "\n\n" + body + "\n\n" + footer
+}
+
+// loopStatusLine renders the persistent recording-state line shown on every
+// tab, colouring the loop badge (green closed / amber open / dim unknown) from
+// the latest parseable frame's fuel-trim state.
+func (m tuiModel) loopStatusLine() string {
+	ft := m.lastGood.FuelTrim
+	badge := stream.LoopBadge(ft, m.hasGood)
+	rest := strings.TrimPrefix(stream.LoopStatus(ft, m.hasGood), badge)
+	var style lipgloss.Style
+	switch {
+	case !m.hasGood:
+		style = dimStyle
+	case ft.ClosedLoop:
+		style = loopClosed
+	default:
+		style = loopOpen
+	}
+	return "  " + style.Render(badge) + rest
 }
 
 // heartbeat is the per-frame data-quality tick: green when the latest frame

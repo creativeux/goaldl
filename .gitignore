@@ -9,3 +9,6 @@
 # Canonical test fixtures live in pkg/decoder/testdata/ instead.
 /*.raw
 /*.csv
+
+# Saved grid tables from the TUI (s key): goaldl_<timestamp>_{BLM,INT,O2}.txt
+/goaldl_*.txt

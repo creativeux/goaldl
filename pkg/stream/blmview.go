@@ -63,15 +63,12 @@ func BLMBody(g *blm.Grid, ev FrameEvent, minCount int) string {
 	if ft.Recordable() {
 		ar, ac = g.Cell(ft.RPM, ft.MapKPa)
 	}
-	avg := g.Average()
-	samples := g.Samples()
-
 	var status string
 	switch {
 	case ft.ClosedLoop && ft.BLMEnabled:
 		prog := ""
 		if ar >= 0 {
-			prog = fmt.Sprintf("  cell %.0f/%d", math.Min(float64(samples[ar][ac]), float64(minCount)), minCount)
+			prog = fmt.Sprintf("  cell %.0f/%d", math.Min(float64(g.Samples()[ar][ac]), float64(minCount)), minCount)
 		}
 		status = fmt.Sprintf("CLOSED LOOP  RPM %.0f  MAP %.0f kPa  BLM %.0f%s", ft.RPM, ft.MapKPa, ft.BLM, prog)
 	case !ft.ClosedLoop:
@@ -80,32 +77,6 @@ func BLMBody(g *blm.Grid, ev FrameEvent, minCount int) string {
 		status = "block learn disabled — not recording"
 	}
 
-	var b strings.Builder
-	fmt.Fprintln(&b, status)
-	b.WriteString("  RPM\\MAP")
-	for _, m := range g.MAP {
-		fmt.Fprintf(&b, " %4.0f", m)
-	}
-	b.WriteByte('\n')
-	for r, rpm := range g.RPM {
-		fmt.Fprintf(&b, "  %5.0f ", rpm)
-		for c := range g.MAP {
-			var cellText string
-			switch {
-			case samples[r][c] == 0:
-				cellText = "    ·"
-			case samples[r][c] < minCount:
-				cellText = fmt.Sprintf("\033[2m%5.0f\033[0m", math.Round(avg[r][c]))
-			default:
-				cellText = fmt.Sprintf("%5.0f", math.Round(avg[r][c]))
-			}
-			if r == ar && c == ac {
-				cellText = "\033[7m" + strings.TrimPrefix(strings.TrimSuffix(cellText, "\033[0m"), "\033[2m") + "\033[0m"
-			}
-			b.WriteString(cellText)
-		}
-		b.WriteByte('\n')
-	}
-	fmt.Fprintf(&b, "  target 128:  >128 lean, <128 rich;  · = no data, dim = <%d samples", minCount)
-	return b.String()
+	legend := fmt.Sprintf("  target 128:  >128 lean, <128 rich;  · = no data, dim = <%d samples", minCount)
+	return gridHeat(g, ar, ac, minCount, 0, status, legend)
 }
