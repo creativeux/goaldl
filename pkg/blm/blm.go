@@ -17,6 +17,12 @@ package blm
 // Neutral is the BLM value at which the ECM applies no long-term correction.
 const Neutral = 128.0
 
+// DefaultMinSamples is how many readings a cell needs before its average is
+// trusted. BLM steps around as the ECM hunts, so one or two samples are noisy;
+// WinALDL treats a cell as populated at roughly 3-4. Below this a cell is shown
+// as still-accumulating and its correction is held at 1.0 (no change).
+const DefaultMinSamples = 4
+
 // DefaultRPM and DefaultMAP are the WinALDL-style display grid: RPM 400..6400
 // in 400 steps, MAP 20..100 kPa in 10 steps. Match data/20250601_162123_BLM.txt.
 var (
@@ -129,6 +135,32 @@ func (g *Grid) Correction() [][]float64 {
 		}
 		return (cl.sum / float64(cl.count)) / Neutral
 	})
+}
+
+// CorrectionAtLeast returns the correction grid with cells having fewer than
+// minSamples held at 1.0 (no change), so sparse, noisy cells don't suggest a
+// fuel edit that only one or two readings support.
+func (g *Grid) CorrectionAtLeast(minSamples int) [][]float64 {
+	return g.floatGrid(func(cl cell) float64 {
+		if cl.count < minSamples {
+			return 1.0
+		}
+		return (cl.sum / float64(cl.count)) / Neutral
+	})
+}
+
+// PopulatedCells counts cells that have reached minSamples — i.e. cells whose
+// average is trustworthy.
+func (g *Grid) PopulatedCells(minSamples int) int {
+	n := 0
+	for r := range g.cells {
+		for c := range g.cells[r] {
+			if g.cells[r][c].count >= minSamples {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 func (g *Grid) floatGrid(f func(cell) float64) [][]float64 {

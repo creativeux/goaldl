@@ -19,7 +19,7 @@ func cmdBLM() {
 	fs := flag.NewFlagSet("blm", flag.ExitOnError)
 	baudRate := fs.Int("b", 4800, "UART sampling baud rate the capture was recorded at")
 	invert := fs.Bool("invert", false, "Invert byte values (non-inverting cable)")
-	minSamples := fs.Int("min", 1, "Hide cells with fewer than this many samples in the correction table")
+	minSamples := fs.Int("min", blm.DefaultMinSamples, "Samples a cell needs before its correction is trusted (below this: no change)")
 	csvOut := fs.String("o", "", "Write the correction table to this CSV file")
 	fs.Parse(os.Args[2:])
 
@@ -67,11 +67,15 @@ func cmdBLM() {
 		return
 	}
 
+	fmt.Printf("%d of %d cells reached %d+ samples (trusted)\n\n",
+		grid.PopulatedCells(*minSamples), grid.PopulatedCells(1), *minSamples)
+
 	fmt.Print(grid.RenderInt("Samples", grid.Samples()))
 	fmt.Println()
 	fmt.Print(grid.RenderFloat("Wide Average BLM (target 128; >128 lean, <128 rich)", grid.Average(), 1))
 	fmt.Println()
-	fmt.Print(grid.RenderFloat("Correction factor = avg/128 (multiply base VE/fuel by this)", correctionMasked(grid, *minSamples), 3))
+	fmt.Printf("Correction factor = avg/128 (cells with <%d samples held at 1.000)\n", *minSamples)
+	fmt.Print(grid.RenderFloat("", grid.CorrectionAtLeast(*minSamples), 3))
 
 	if *csvOut != "" {
 		if err := writeCorrectionCSV(*csvOut, grid, *minSamples); err != nil {
@@ -82,28 +86,13 @@ func cmdBLM() {
 	}
 }
 
-// correctionMasked returns the correction grid with cells below minSamples
-// forced to 1.0 (no change), so sparse, noisy cells don't suggest edits.
-func correctionMasked(g *blm.Grid, minSamples int) [][]float64 {
-	corr := g.Correction()
-	samples := g.Samples()
-	for r := range corr {
-		for c := range corr[r] {
-			if samples[r][c] < minSamples {
-				corr[r][c] = 1.0
-			}
-		}
-	}
-	return corr
-}
-
 func writeCorrectionCSV(path string, g *blm.Grid, minSamples int) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	corr := correctionMasked(g, minSamples)
+	corr := g.CorrectionAtLeast(minSamples)
 	fmt.Fprint(f, "rpm\\map")
 	for _, m := range g.MAP {
 		fmt.Fprintf(f, ",%g", m)

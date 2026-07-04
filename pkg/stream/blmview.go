@@ -20,13 +20,18 @@ type BLMView struct {
 	isTTY     bool
 	Grid      *blm.Grid
 	title     string
+	minCount  int // samples before a cell is trusted (shown solid vs dim)
 	recorded  int
 	lastLines int
 }
 
-// NewBLMView builds a live BLM view over a fresh default grid.
-func NewBLMView(w io.Writer, isTTY bool, title string) *BLMView {
-	return &BLMView{w: w, isTTY: isTTY, Grid: blm.NewDefault(), title: title}
+// NewBLMView builds a live BLM view over a fresh default grid. A cell is drawn
+// dim (still accumulating) until it reaches minSamples, then solid.
+func NewBLMView(w io.Writer, isTTY bool, title string, minSamples int) *BLMView {
+	if minSamples < 1 {
+		minSamples = 1
+	}
+	return &BLMView{w: w, isTTY: isTTY, Grid: blm.NewDefault(), title: title, minCount: minSamples}
 }
 
 // Render observes one frame: records it if valid, then redraws the grid live.
@@ -59,7 +64,11 @@ func (v *BLMView) format(ft ecm.FuelTrim, ar, ac int) string {
 	var status string
 	switch {
 	case ft.ClosedLoop && ft.BLMEnabled:
-		status = fmt.Sprintf("CLOSED LOOP  RPM %.0f  MAP %.0f kPa  BLM %.0f", ft.RPM, ft.MapKPa, ft.BLM)
+		prog := ""
+		if ar >= 0 {
+			prog = fmt.Sprintf("  cell %.0f/%d", math.Min(float64(samples[ar][ac]), float64(v.minCount)), v.minCount)
+		}
+		status = fmt.Sprintf("CLOSED LOOP  RPM %.0f  MAP %.0f kPa  BLM %.0f%s", ft.RPM, ft.MapKPa, ft.BLM, prog)
 	case !ft.ClosedLoop:
 		status = "OPEN LOOP — not recording (WOT / decel / cold)"
 	default:
@@ -67,7 +76,7 @@ func (v *BLMView) format(ft ecm.FuelTrim, ar, ac int) string {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s   recorded %d   %s\n", v.title, v.recorded, status)
+	fmt.Fprintf(&b, "%s   %d cells ready   %s\n", v.title, v.Grid.PopulatedCells(v.minCount), status)
 	// Column header.
 	b.WriteString("  RPM\\MAP")
 	for _, m := range v.Grid.MAP {
@@ -77,17 +86,23 @@ func (v *BLMView) format(ft ecm.FuelTrim, ar, ac int) string {
 	for r, rpm := range v.Grid.RPM {
 		fmt.Fprintf(&b, "  %5.0f ", rpm)
 		for c := range v.Grid.MAP {
-			cellText := "    ·"
-			if samples[r][c] > 0 {
+			var cellText string
+			switch {
+			case samples[r][c] == 0:
+				cellText = "    ·"
+			case samples[r][c] < v.minCount:
+				// Still accumulating: dim so it reads as provisional.
+				cellText = fmt.Sprintf("\033[2m%5.0f\033[0m", math.Round(avg[r][c]))
+			default:
 				cellText = fmt.Sprintf("%5.0f", math.Round(avg[r][c]))
 			}
 			if r == ar && c == ac {
-				cellText = "\033[7m" + cellText + "\033[0m" // reverse-video the active cell
+				cellText = "\033[7m" + strings.TrimPrefix(strings.TrimSuffix(cellText, "\033[0m"), "\033[2m") + "\033[0m"
 			}
 			b.WriteString(cellText)
 		}
 		b.WriteByte('\n')
 	}
-	b.WriteString("  target 128:  >128 lean, <128 rich;  · = no data")
+	fmt.Fprintf(&b, "  target 128:  >128 lean, <128 rich;  · = no data, dim = <%d samples", v.minCount)
 	return b.String()
 }

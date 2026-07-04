@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"goaldl/pkg/aldl"
+	"goaldl/pkg/blm"
 	"goaldl/pkg/decoder"
 	"goaldl/pkg/ecm"
 	"goaldl/pkg/stream"
@@ -31,6 +32,7 @@ func cmdMonitor() {
 	record := fs.String("o", "", "Live only: also record raw bytes to this file")
 	csvOut := fs.String("csv", "", "Also export decoded frames to this CSV file (sensor view)")
 	blmView := fs.Bool("blm", false, "Show a live BLM fuel-trim grid instead of the sensor table")
+	minSamples := fs.Int("min", blm.DefaultMinSamples, "BLM view: samples before a cell is trusted (shown solid vs dim)")
 	speed := fs.Float64("speed", 1.0, "Replay only: playback speed (1=real time, 0=as fast as possible)")
 	fs.Parse(os.Args[2:])
 
@@ -81,7 +83,7 @@ func cmdMonitor() {
 	defer stop()
 
 	if *blmView {
-		runBLMView(ctx, provider, "goaldl BLM — "+strings.TrimPrefix(title, "goaldl monitor — "))
+		runBLMView(ctx, provider, "goaldl BLM — "+strings.TrimPrefix(title, "goaldl monitor — "), *minSamples)
 		return
 	}
 
@@ -122,18 +124,22 @@ func cmdMonitor() {
 }
 
 // runBLMView streams frames through a live BLM grid, then prints the final
-// Wide Average and Correction tables when the stream ends.
-func runBLMView(ctx context.Context, provider stream.Provider, title string) {
-	view := stream.NewBLMView(os.Stdout, isTTY(os.Stdout), title)
+// Wide Average and Correction tables when the stream ends. Cells below
+// minSamples are held at 1.0 in the correction table.
+func runBLMView(ctx context.Context, provider stream.Provider, title string, minSamples int) {
+	view := stream.NewBLMView(os.Stdout, isTTY(os.Stdout), title, minSamples)
 	err := provider.Run(ctx, view.Render)
 	if err != nil && err != context.Canceled {
 		fmt.Fprintf(os.Stderr, "\nProvider error: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("\n\nFinal — recorded %d closed-loop samples\n\n", view.Grid.TotalSamples())
-	fmt.Print(view.Grid.RenderFloat("Wide Average BLM (target 128; >128 lean, <128 rich)", view.Grid.Average(), 1))
+	g := view.Grid
+	fmt.Printf("\n\nFinal — %d closed-loop samples, %d cells reached %d+ (trusted)\n\n",
+		g.TotalSamples(), g.PopulatedCells(minSamples), minSamples)
+	fmt.Print(g.RenderFloat("Wide Average BLM (target 128; >128 lean, <128 rich)", g.Average(), 1))
 	fmt.Println()
-	fmt.Print(view.Grid.RenderFloat("Correction factor = avg/128 (multiply base VE/fuel by this)", view.Grid.Correction(), 3))
+	fmt.Printf("Correction factor = avg/128 (cells with <%d samples held at 1.000)\n", minSamples)
+	fmt.Print(g.RenderFloat("", g.CorrectionAtLeast(minSamples), 3))
 }
 
 // isTTY reports whether f is an interactive terminal, so the renderer knows
