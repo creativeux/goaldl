@@ -16,13 +16,6 @@ import (
 	"goaldl/pkg/stream"
 )
 
-// cmdTUI launches the interactive dashboard — the default face of goaldl. It
-// navigates between the sensor table, the BLM grid, the flag-data and
-// error-code views, and a scrolling raw-byte history, driven by a
-// stream.Session over either a live ECM (-p) or a replayed capture.
-//
-//	goaldl -p /dev/cu.usbserial-10
-//	goaldl drive_4800.raw [-speed 2]
 // errNoTUISource signals that neither a port nor a capture file was given, so
 // cmdTUI can print its detailed source-selection help.
 var errNoTUISource = errors.New("no source")
@@ -95,6 +88,13 @@ func resolveTUIFlags(args []string) (*tuiFlags, error) {
 	}, nil
 }
 
+// cmdTUI launches the interactive dashboard — the default face of goaldl. It
+// navigates between the sensor table, the BLM grid, the flag-data and
+// error-code views, and a scrolling raw-byte history, driven by a
+// stream.Session over either a live ECM (-p) or a replayed capture.
+//
+//	goaldl -p /dev/cu.usbserial-10
+//	goaldl drive_4800.raw [-speed 2]
 func cmdTUI(args []string) {
 	cfg, err := resolveTUIFlags(args)
 	if err != nil {
