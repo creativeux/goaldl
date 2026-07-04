@@ -22,7 +22,7 @@ import (
 //
 //	goaldl monitor -p /dev/cu.usbserial-10 [-o capture.raw] [-csv frames.csv]   # live
 //	goaldl monitor drive_4800.raw [-speed 2] [-csv frames.csv]                  # replay
-func cmdMonitor() {
+func cmdMonitor(args []string) {
 	fs := flag.NewFlagSet("monitor", flag.ExitOnError)
 	portName := fs.String("p", "", "Live: serial port to read from (omit to replay a file)")
 	baudRate := fs.Int("b", 4800, "UART sampling baud rate")
@@ -33,8 +33,10 @@ func cmdMonitor() {
 	csvOut := fs.String("csv", "", "Also export decoded frames to this CSV file (sensor view)")
 	blmView := fs.Bool("blm", false, "Show a live BLM fuel-trim grid instead of the sensor table")
 	minSamples := fs.Int("min", blm.DefaultMinSamples, "BLM view: samples before a cell is trusted (shown solid vs dim)")
+	tps0 := fs.Float64("tps0", ecm.DefaultTPS0, "TPS calibration: volts at 0% throttle")
+	tps100 := fs.Float64("tps100", ecm.DefaultTPS100, "TPS calibration: volts at 100% throttle")
 	speed := fs.Float64("speed", 1.0, "Replay only: playback speed (1=real time, 0=as fast as possible)")
-	fs.Parse(os.Args[2:])
+	fs.Parse(args)
 
 	cfg := decoder.Config{BaudRate: *baudRate, FrameSize: 20, SyncBits: 9, Invert: *invert}
 	registry := ecm.NewRegistry()
@@ -43,6 +45,7 @@ func cmdMonitor() {
 		fmt.Fprintf(os.Stderr, "Unknown ECM: %s\n", *ecmPart)
 		os.Exit(1)
 	}
+	def = calibratedDef(def, *tps0, *tps100)
 
 	var provider stream.Provider
 	var title string
@@ -101,13 +104,13 @@ func cmdMonitor() {
 		csv = c
 	}
 
-	renderer := stream.NewRenderer(os.Stdout, isTTY(os.Stdout), registry, *ecmPart, *promID, title)
+	renderer := stream.NewRenderer(os.Stdout, isTTY(os.Stdout), def, *promID, title)
 	var frames int
 	err := provider.Run(ctx, func(ev stream.FrameEvent) {
 		frames++
 		renderer.Render(ev)
 		if csv != nil {
-			promOK := *promID == 0 || frameProm(ev.Frame.Data) == *promID
+			promOK := *promID == 0 || ecm.FramePROM(ev.Frame.Data) == *promID
 			if data, perr := registry.ParseFrame(&aldl.Frame{Data: ev.Frame.Data}, *ecmPart); perr == nil {
 				csv.Write(ev.Elapsed.Seconds(), ev.Frame.ByteOffset, promOK, data.ParsedValues)
 			}

@@ -44,11 +44,15 @@ Key boundaries:
 *Lead: Architect*
 -   [x] TUI dashboard (Bubble Tea) as the default face, driven by `stream.Session`
 -   [x] Core Session/Snapshot API refactor (branch `feat/tui-session-api`)
--   [ ] Dashboard: recording toggle, replay pause/speed keys, live byte-stream raw view
+-   [ ] **Epic: WinALDL parity** (spec: `specs/2026-07-04_feature_winaldl-parity/`) — delta documented (D1–D16), 4-phase plan; **MVP = Phase 1 agreed 2026-07-04**
+    -   [x] Feature: Phase 1 diagnose parity (MVP) — flags/codes/knock parsed as ecm data tables onto Snapshot; 5 TUI tabs (Sensors/BLM/Flags/Codes/Raw history); dual-unit sensor table (TPS% with -tps0/-tps100, MAP kPa); heartbeat + ParseOK gating. Implemented + verified 2026-07-04.
+    -   [ ] Feature: Phase 2 tune parity (INT/O2 grids, in-TUI save/clear, Max/Min) — planned, next up
+    -   [ ] Feature: Phase 3 session UX (recording toggle, replay pause/speed keys, spark grid, CSV toggle) — subsumes prior "Dashboard:" backlog line
 -   [ ] `serve` adapter (HTTP/WebSocket) proving the Session API drives a non-terminal front-end
 
 ### 2. Backlog / Upcoming
--   [ ] Verify `MapVoltsToKPa` transfer function against WinALDL (only unverified BLM assumption)
+-   [x] ~~Verify `MapVoltsToKPa` transfer~~ — **RESOLVED 2026-07-04**: WinALDL log proves kPa = (raw+28.06)/2.71; formula corrected (was ~3 kPa low), BLM cell values now match WinALDL's own table (117.17 vs 117.5 at 1600×40)
+-   [ ] Coolant curve divergence (observation, accepted): WinALDL uses a smooth curve ~3°F below our stepped A033 table at warm idle; A033 table kept as authority
 -   [ ] Optional phase 2: onboard MCU datalogging bridge (bot-thoughts method)
 
 ## Known Issues / Technical Debt
@@ -71,6 +75,7 @@ Key boundaries:
 - Standard Go tooling only (gofmt/vet/test -race), no extra linters — Confidence: Medium (may be by omission)
 
 ## Recent Changes
+- 2026-07-04: **WinALDL parity Phase 1 (MVP) shipped** — flags/error-codes/knock decoded as ecm data tables (A033.ads-verified bit order), Snapshot carries Flags/Codes, TUI grew to 5 tabs (Flags, Codes, scrolling Raw history) + heartbeat/gating, sensor table dual-unit (TPS%, MAP kPa). `MapVoltsToKPa` corrected to the WinALDL-verified transfer. Spec trace: `specs/2026-07-04_feature_winaldl-parity/`.
 - 2026-07-04: Adopted into GLaDOS framework (SDA v1.0); standards/philosophies extracted from CLAUDE.md and code.
 - 2026-07-03: Refactor to core Session API; TUI dashboard as default face; PR review fixes (branch `feat/tui-session-api`).
 - 2026-07-03: Consolidation — 23 experimental tools and 6 dead decoders deleted (7214 → ~1775 lines then), repo under git, test suite rooted in real captures.

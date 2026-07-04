@@ -76,7 +76,6 @@ func TestCoolantTempLookup(t *testing.T) {
 // TestExtractParameterValue exercises the generic converter directly, including
 // the Bias term (unused by the 1227747 but part of the model) and error cases.
 func TestExtractParameterValue(t *testing.T) {
-	r := NewRegistry()
 	frame := []byte{0, 100, 0x01, 0x00, 5}
 
 	tests := []struct {
@@ -94,7 +93,7 @@ func TestExtractParameterValue(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := r.extractParameterValue(frame, &tt.param)
+			got, err := extractParameterValue(frame, &tt.param)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
 			}

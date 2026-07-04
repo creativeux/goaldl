@@ -14,6 +14,9 @@ type Definition struct {
 	DataStreamID byte
 	FrameSize    int
 	Parameters   []Parameter
+	FlagWords    []FlagWord  // status words with labeled bits (see flags.go)
+	ErrorCodes   []ErrorCode // malfunction-flag bits → GM trouble codes
+	ByteLabels   []string    // per-byte frame labels (WinALDL naming), len == FrameSize
 }
 
 // Lookup converts a raw byte to an engineering value through a non-linear
@@ -34,7 +37,54 @@ type Parameter struct {
 	Factor      float64 // linear scale applied to the raw value
 	Bias        float64 // additive offset applied after Factor
 	Lookup      Lookup  // non-linear conversion; when set, Factor/Bias are ignored
+	Alt         *AltConversion
 	Description string
+}
+
+// AltConversion is a second engineering conversion of the same raw byte, for
+// dual-unit display (WinALDL shows US and metric side by side: °F/°C, MPH/KPH,
+// MAP V/kPa, TPS V/%). Same shape as the primary conversion — pure data.
+// Applies to single-byte parameters only.
+type AltConversion struct {
+	Factor float64
+	Bias   float64
+	Lookup Lookup // when set, Factor/Bias are ignored
+	Unit   string
+}
+
+// Default TPS calibration (WinALDL's defaults): throttle-position percent is
+// (volts−V0)/(V100−V0)×100. Overridable per vehicle via WithTPSCalibration.
+const (
+	DefaultTPS0   = 0.54 // volts at 0% throttle
+	DefaultTPS100 = 4.60 // volts at 100% throttle
+)
+
+// TPSPercentAlt builds the TPS percent alternate conversion for a calibration.
+// Verified against the WinALDL log with the defaults (raw 28→0.2%, 39→5.5%,
+// 62→16.6%).
+func TPSPercentAlt(v0, v100 float64) *AltConversion {
+	span := v100 - v0
+	return &AltConversion{Factor: 0.0196 * 100 / span, Bias: -100 * v0 / span, Unit: "%"}
+}
+
+// WithTPSCalibration returns a copy of the definition whose tps_voltage
+// parameter converts to percent using the given calibration voltages. A
+// degenerate calibration (v100 ≤ v0) returns the definition unchanged —
+// callers validate and warn. The receiver is never modified (Parameters are
+// cloned), so registry-held definitions stay pristine.
+func (d *Definition) WithTPSCalibration(v0, v100 float64) *Definition {
+	if v100 <= v0 {
+		return d
+	}
+	out := *d
+	out.Parameters = make([]Parameter, len(d.Parameters))
+	copy(out.Parameters, d.Parameters)
+	for i := range out.Parameters {
+		if out.Parameters[i].Name == "tps_voltage" {
+			out.Parameters[i].Alt = TPSPercentAlt(v0, v100)
+		}
+	}
+	return &out
 }
 
 // Data represents parsed ECM data
@@ -84,25 +134,10 @@ func (r *Registry) ParseFrame(frame *aldl.Frame, ecmPart string) (*Data, error) 
 	if !ok {
 		return nil, errors.NewUnsupportedECM(ecmPart)
 	}
-
-	// Frame must be at least the minimum size for basic sensors
-	minRequiredSize := 20
-	if len(frame.Data) < minRequiredSize {
-		return nil, errors.NewInvalidFrame(
-			fmt.Sprintf("frame too small: expected at least %d bytes, got %d", minRequiredSize, len(frame.Data)),
-		)
+	parsedValues, err := def.Parse(frame.Data)
+	if err != nil {
+		return nil, err
 	}
-
-	parsedValues := make(map[string]float64)
-
-	for _, param := range def.Parameters {
-		value, err := r.extractParameterValue(frame.Data, &param)
-		if err != nil {
-			return nil, err
-		}
-		parsedValues[param.Name] = value
-	}
-
 	return &Data{
 		EcmDefinition: *def,
 		RawData:       frame.Data,
@@ -110,11 +145,33 @@ func (r *Registry) ParseFrame(frame *aldl.Frame, ecmPart string) (*Data, error) 
 	}, nil
 }
 
+// Parse converts a raw frame to engineering values, one entry per parameter.
+// It is the definition-level core of Registry.ParseFrame, usable directly by
+// consumers that hold a (possibly calibrated) Definition.
+func (d *Definition) Parse(data []byte) (map[string]float64, error) {
+	// Frame must be at least the minimum size for basic sensors
+	minRequiredSize := 20
+	if len(data) < minRequiredSize {
+		return nil, errors.NewInvalidFrame(
+			fmt.Sprintf("frame too small: expected at least %d bytes, got %d", minRequiredSize, len(data)),
+		)
+	}
+	parsedValues := make(map[string]float64)
+	for _, param := range d.Parameters {
+		value, err := extractParameterValue(data, &param)
+		if err != nil {
+			return nil, err
+		}
+		parsedValues[param.Name] = value
+	}
+	return parsedValues, nil
+}
+
 // extractParameterValue reads a parameter's raw bytes from the frame and
 // converts them to an engineering value using the parameter's own Factor/Bias
 // (or Lookup). There is no per-sensor code path — the conversion lives entirely
 // in the ECM definition.
-func (r *Registry) extractParameterValue(data []byte, param *Parameter) (float64, error) {
+func extractParameterValue(data []byte, param *Parameter) (float64, error) {
 	if param.Offset < 0 || param.Offset+param.Size > len(data) {
 		return 0, errors.NewInvalidFrame(
 			fmt.Sprintf("parameter %s exceeds frame bounds", param.Name),

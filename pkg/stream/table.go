@@ -6,22 +6,24 @@ import (
 	"math"
 	"strings"
 
-	"goaldl/pkg/aldl"
 	"goaldl/pkg/ecm"
 )
 
 // Row is one line of the sensor table: the human-readable sensor name, its raw
-// bytes from the frame, and the translated value with unit.
+// bytes from the frame, the translated value with unit, and the alternate
+// (dual-unit) value when the parameter defines one.
 type Row struct {
 	Sensor string
 	Raw    string
 	Value  string
+	Alt    string
 }
 
 // BuildRows turns a frame and its parsed values into table rows, one per ECM
 // parameter in definition order. Raw comes straight from the frame bytes;
-// Value comes from parsed (missing entries render as "—"). This is pure so it
-// can be unit-tested without a terminal.
+// Value comes from parsed (missing entries render as "—"); Alt is the
+// parameter's alternate conversion applied to the same raw byte (blank when
+// none is defined). This is pure so it can be unit-tested without a terminal.
 func BuildRows(frame []byte, def *ecm.Definition, parsed map[string]float64) []Row {
 	rows := make([]Row, 0, len(def.Parameters))
 	for _, p := range def.Parameters {
@@ -29,6 +31,7 @@ func BuildRows(frame []byte, def *ecm.Definition, parsed map[string]float64) []R
 			Sensor: sensorLabel(p),
 			Raw:    formatRaw(frame, p),
 			Value:  formatValue(parsed, p),
+			Alt:    formatAlt(frame, p),
 		})
 	}
 	return rows
@@ -65,36 +68,59 @@ func formatValue(parsed map[string]float64, p ecm.Parameter) string {
 	if !ok {
 		return "—"
 	}
+	return formatNum(v, p.Unit)
+}
+
+// formatAlt renders the parameter's alternate (dual-unit) conversion of the
+// same raw byte, or blank when the parameter has none. Alternate conversions
+// apply to single-byte parameters only.
+func formatAlt(frame []byte, p ecm.Parameter) string {
+	if p.Alt == nil || p.Size != 1 || p.Offset < 0 || p.Offset >= len(frame) {
+		return ""
+	}
+	raw := frame[p.Offset]
+	var v float64
+	if p.Alt.Lookup != nil {
+		v = p.Alt.Lookup(raw)
+	} else {
+		v = float64(raw)*p.Alt.Factor + p.Alt.Bias
+	}
+	return formatNum(v, p.Alt.Unit)
+}
+
+func formatNum(v float64, unit string) string {
 	var s string
 	if math.Abs(v-math.Round(v)) < 1e-9 {
 		s = fmt.Sprintf("%.0f", v)
 	} else {
 		s = fmt.Sprintf("%.2f", v)
 	}
-	if p.Unit != "" {
-		s += " " + p.Unit
+	if unit != "" {
+		s += " " + unit
 	}
 	return s
 }
 
-// renderTable formats rows into an aligned three-column table (no trailing
+// renderTable formats rows into an aligned four-column table (no trailing
 // newline on the last line).
 func renderTable(rows []Row) string {
 	const (
 		hSensor = "SENSOR"
 		hRaw    = "RAW"
 		hValue  = "VALUE"
+		hAlt    = "ALT"
 	)
-	wS, wR := len(hSensor), len(hRaw)
+	wS, wR, wV := len(hSensor), len(hRaw), len(hValue)
 	for _, r := range rows {
 		wS = max(wS, len(r.Sensor))
 		wR = max(wR, len(r.Raw))
+		wV = max(wV, len(r.Value))
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%-*s  %-*s  %s\n", wS, hSensor, wR, hRaw, hValue)
-	fmt.Fprintf(&b, "%s\n", strings.Repeat("─", wS+wR+len(hValue)+4))
+	fmt.Fprintf(&b, "%-*s  %-*s  %-*s  %s\n", wS, hSensor, wR, hRaw, wV, hValue, hAlt)
+	fmt.Fprintf(&b, "%s\n", strings.Repeat("─", wS+wR+wV+len(hAlt)+6))
 	for i, r := range rows {
-		fmt.Fprintf(&b, "%-*s  %-*s  %s", wS, r.Sensor, wR, r.Raw, r.Value)
+		fmt.Fprintf(&b, "%-*s  %-*s  %-*s  %s", wS, r.Sensor, wR, r.Raw, wV, r.Value, r.Alt)
 		if i < len(rows)-1 {
 			b.WriteByte('\n')
 		}
@@ -106,35 +132,42 @@ func renderTable(rows []Row) string {
 type Renderer struct {
 	w         io.Writer
 	isTTY     bool
-	registry  *ecm.Registry
-	ecmPart   string
+	def       *ecm.Definition
 	promID    int
 	title     string
 	lastLines int
 }
 
-// NewRenderer builds a table renderer. promID is the expected PROM ID for the
-// header's sync indicator (0 disables it).
-func NewRenderer(w io.Writer, isTTY bool, registry *ecm.Registry, ecmPart string, promID int, title string) *Renderer {
-	return &Renderer{w: w, isTTY: isTTY, registry: registry, ecmPart: ecmPart, promID: promID, title: title}
+// NewRenderer builds a table renderer over an ECM definition (possibly
+// calibrated — see Definition.WithTPSCalibration). promID is the expected PROM
+// ID for the header's sync indicator (0 disables it).
+func NewRenderer(w io.Writer, isTTY bool, def *ecm.Definition, promID int, title string) *Renderer {
+	return &Renderer{w: w, isTTY: isTTY, def: def, promID: promID, title: title}
+}
+
+// rowsFor parses a frame and builds its sensor rows, leaving values blank on a
+// parse error. Shared by the streaming Renderer and SensorTable.
+func rowsFor(ev FrameEvent, def *ecm.Definition) []Row {
+	parsed, err := def.Parse(ev.Frame.Data)
+	if err != nil {
+		parsed = map[string]float64{}
+	}
+	return BuildRows(ev.Frame.Data, def, parsed)
+}
+
+// SensorTable renders one frame's sensor/raw/value/alt table as a string, with
+// no terminal control codes — for embedding in a TUI or other presenter.
+func SensorTable(ev FrameEvent, def *ecm.Definition) string {
+	return renderTable(rowsFor(ev, def))
 }
 
 // Render draws the table for one frame event. On a TTY it moves the cursor
 // back up over the previous table and overwrites it; otherwise it prints each
 // frame as a fresh block.
 func (r *Renderer) Render(ev FrameEvent) {
-	data, err := r.registry.ParseFrame(&aldl.Frame{Data: ev.Frame.Data}, r.ecmPart)
-	var rows []Row
-	def, _ := r.registry.GetDefinition(r.ecmPart)
-	if err == nil {
-		rows = BuildRows(ev.Frame.Data, def, data.ParsedValues)
-	} else {
-		rows = BuildRows(ev.Frame.Data, def, map[string]float64{})
-	}
-
 	header := fmt.Sprintf("%s   frame %d   t=%.1fs   %s",
 		r.title, ev.Index, ev.Elapsed.Seconds(), r.promMark(ev.Frame.Data))
-	body := header + "\n" + renderTable(rows)
+	body := header + "\n" + renderTable(rowsFor(ev, r.def))
 
 	if r.isTTY {
 		if r.lastLines > 0 {

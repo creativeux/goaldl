@@ -18,13 +18,13 @@ import (
 // cmdRecord captures raw UART bytes to a file with zero processing, so all
 // decoder work can happen offline and repeatably. One 60s idle capture at the
 // car is enough to develop against at a desk.
-func cmdRecord() {
+func cmdRecord(args []string) {
 	fs := flag.NewFlagSet("record", flag.ExitOnError)
 	portName := fs.String("p", "", "Serial port name (required)")
 	baudRate := fs.Int("b", 4800, "UART sampling baud rate")
 	output := fs.String("o", "", "Output file (default aldl_capture_<baud>.raw)")
 	seconds := fs.Int("t", 60, "Capture duration in seconds (Ctrl+C stops early)")
-	fs.Parse(os.Args[2:])
+	fs.Parse(args)
 
 	if *portName == "" {
 		fmt.Fprintln(os.Stderr, "Error: port name required (-p)")
@@ -144,7 +144,7 @@ func printHistogram(histogram map[byte]int64, total int64) {
 // cmdDecode runs the byte-value decoder over a raw capture file (or live
 // from a serial port with -p) and reports frames, PROM ID validation, and
 // sensor values.
-func cmdDecode() {
+func cmdDecode(args []string) {
 	fs := flag.NewFlagSet("decode", flag.ExitOnError)
 	baudRate := fs.Int("b", 4800, "UART sampling baud rate the capture was recorded at")
 	ecmPart := fs.String("e", defaultECM, "ECM part number")
@@ -152,7 +152,7 @@ func cmdDecode() {
 	promID := fs.Int("prom", 6291, "Expected PROM ID for frame validation (0 to disable)")
 	invert := fs.Bool("invert", false, "Invert byte values (non-inverting cable)")
 	verbose := fs.Bool("v", false, "Print every frame instead of the first 5")
-	fs.Parse(os.Args[2:])
+	fs.Parse(args)
 
 	if fs.NArg() < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: goaldl decode <capture.raw> [-b baud] [-o out.csv]  (live: goaldl monitor -p <port>)")
@@ -211,7 +211,7 @@ func cmdDecode() {
 
 	promMatches := 0
 	for _, f := range frames {
-		if frameProm(f.Data) == *promID {
+		if ecm.FramePROM(f.Data) == *promID {
 			promMatches++
 		}
 	}
@@ -234,7 +234,7 @@ func cmdDecode() {
 		// Each capture byte is one ALDL bit at 160 bps, so the stream
 		// position converts directly to elapsed seconds.
 		tSec := float64(f.ByteOffset) / 160.0
-		promOK := *promID == 0 || frameProm(f.Data) == *promID
+		promOK := *promID == 0 || ecm.FramePROM(f.Data) == *promID
 
 		data, perr := registry.ParseFrame(&aldl.Frame{Data: f.Data, Timestamp: time.Time{}}, *ecmPart)
 		if csv != nil && perr == nil {
@@ -268,10 +268,6 @@ func cmdDecode() {
 	}
 }
 
-func frameProm(data []byte) int {
-	return int(data[1])<<8 | int(data[2])
-}
-
 func boolMark(ok bool) string {
 	if ok {
 		return "✓"
@@ -281,13 +277,13 @@ func boolMark(ok bool) string {
 
 // cmdSimulate writes a synthetic raw capture built from real frames recorded
 // by WinALDL, for demoing the record → decode pipeline without a car.
-func cmdSimulate() {
+func cmdSimulate(args []string) {
 	fs := flag.NewFlagSet("simulate", flag.ExitOnError)
 	baudRate := fs.Int("b", 4800, "UART sampling baud rate to simulate")
 	output := fs.String("o", "", "Output file (default aldl_sim_<baud>.raw)")
 	count := fs.Int("n", 10, "Number of frames")
 	invert := fs.Bool("invert", false, "Simulate a non-inverting cable")
-	fs.Parse(os.Args[2:])
+	fs.Parse(args)
 
 	outName := *output
 	if outName == "" {
