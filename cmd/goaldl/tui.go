@@ -302,9 +302,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		// An open filename prompt captures every key (digits, q, … type into
-		// the buffer); only ctrl+c still quits.
+		// the buffer); only ctrl+c still quits. The mutating call is sequenced
+		// into its own statement so m is copied for the return *after* it runs
+		// (a call inside `return m, …` is unordered relative to reading m).
 		if m.prompt != nil {
-			return m, m.handlePromptKey(msg)
+			cmd := m.handlePromptKey(msg)
+			return m, cmd
 		}
 		switch msg.String() {
 		case "ctrl+c", "q":
@@ -335,7 +338,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "c":
 			m.setNotice(m.clear())
 		case "r":
-			return m, m.toggleRecording()
+			cmd := m.toggleRecording() // sequence the mutation before reading m
+			return m, cmd
 		case "d":
 			m.toggleCSV()
 		case " ":
@@ -344,9 +348,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.replay.SetPaused(!m.replay.Paused())
 		case "+", "=":
-			return m, m.adjustSpeed(2)
+			cmd := m.adjustSpeed(2)
+			return m, cmd
 		case "-":
-			return m, m.adjustSpeed(0.5)
+			cmd := m.adjustSpeed(0.5)
+			return m, cmd
 		}
 
 	case snapshotMsg:
@@ -652,9 +658,9 @@ func humanBytes(n int64) string {
 
 // saveGrids writes the BLM, INT, O2, and spark grids to four files in dir
 // sharing the caller-chosen base name (`<base>_BLM.txt`, …). Files are created
-// exclusively, and every target is checked before anything is written, so a
-// name collision aborts cleanly instead of overwriting or leaving a partial
-// set.
+// exclusively; every target is checked up front so a name collision aborts
+// cleanly (overwriting nothing), and a mid-write failure unlinks the files
+// already created this call — either way no partial set is left behind.
 func saveGrids(dir, base string, blmG, intG, o2G, sparkG *blm.Grid, minSamples int) error {
 	files := []struct {
 		suffix string
@@ -670,13 +676,21 @@ func saveGrids(dir, base string, blmG, intG, o2G, sparkG *blm.Grid, minSamples i
 			return fmt.Errorf("%s_%s.txt: %w", base, fl.suffix, fs.ErrExist)
 		}
 	}
+	var written []string
 	for _, fl := range files {
-		f, err := os.OpenFile(filepath.Join(dir, base+"_"+fl.suffix+".txt"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-		if err != nil {
-			return err
+		path := filepath.Join(dir, base+"_"+fl.suffix+".txt")
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			written = append(written, path)
+			fl.write(f)
+			err = f.Close()
 		}
-		fl.write(f)
-		if err := f.Close(); err != nil {
+		if err != nil {
+			// A mid-write failure (disk full, media pulled) must not leave a
+			// half-written set behind; unlink what this call already created.
+			for _, p := range written {
+				os.Remove(p)
+			}
 			return err
 		}
 	}
