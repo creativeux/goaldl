@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"goaldl/pkg/aldl"
 	"goaldl/pkg/decoder"
 	"goaldl/pkg/ecm"
 	"goaldl/pkg/stream"
@@ -17,8 +18,8 @@ import (
 // driven by either a live ECM (-p) or a replayed capture file. Both paths feed
 // the identical decode → parse → table pipeline.
 //
-//	goaldl monitor -p /dev/cu.usbserial-10 [-o capture.raw]   # live (optionally recording)
-//	goaldl monitor drive_4800.raw [-speed 2]                  # replay a capture
+//	goaldl monitor -p /dev/cu.usbserial-10 [-o capture.raw] [-csv frames.csv]   # live
+//	goaldl monitor drive_4800.raw [-speed 2] [-csv frames.csv]                  # replay
 func cmdMonitor() {
 	fs := flag.NewFlagSet("monitor", flag.ExitOnError)
 	portName := fs.String("p", "", "Live: serial port to read from (omit to replay a file)")
@@ -27,12 +28,14 @@ func cmdMonitor() {
 	promID := fs.Int("prom", 6291, "Expected PROM ID for the sync indicator (0 to disable)")
 	invert := fs.Bool("invert", false, "Invert byte values (non-inverting cable)")
 	record := fs.String("o", "", "Live only: also record raw bytes to this file")
+	csvOut := fs.String("csv", "", "Also export decoded frames to this CSV file")
 	speed := fs.Float64("speed", 1.0, "Replay only: playback speed (1=real time, 0=as fast as possible)")
 	fs.Parse(os.Args[2:])
 
 	cfg := decoder.Config{BaudRate: *baudRate, FrameSize: 20, SyncBits: 9, Invert: *invert}
 	registry := ecm.NewRegistry()
-	if _, ok := registry.GetDefinition(*ecmPart); !ok {
+	def, ok := registry.GetDefinition(*ecmPart)
+	if !ok {
 		fmt.Fprintf(os.Stderr, "Unknown ECM: %s\n", *ecmPart)
 		os.Exit(1)
 	}
@@ -72,6 +75,19 @@ func cmdMonitor() {
 		title = "goaldl monitor — replay " + inName
 	}
 
+	// CSV export is created after the replay branch re-parses trailing flags,
+	// so `monitor <file> -csv out.csv` is honored.
+	var csv *frameCSV
+	if *csvOut != "" {
+		c, err := newFrameCSV(*csvOut, def)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating %s: %v\n", *csvOut, err)
+			os.Exit(1)
+		}
+		defer c.Close()
+		csv = c
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -80,8 +96,17 @@ func cmdMonitor() {
 	err := provider.Run(ctx, func(ev stream.FrameEvent) {
 		frames++
 		renderer.Render(ev)
+		if csv != nil {
+			promOK := *promID == 0 || frameProm(ev.Frame.Data) == *promID
+			if data, perr := registry.ParseFrame(&aldl.Frame{Data: ev.Frame.Data}, *ecmPart); perr == nil {
+				csv.Write(ev.Elapsed.Seconds(), ev.Frame.ByteOffset, promOK, data.ParsedValues)
+			}
+		}
 	})
 	fmt.Printf("\nStopped after %d frames.\n", frames)
+	if csv != nil {
+		fmt.Printf("Wrote %d frames to %s\n", csv.Rows, *csvOut)
+	}
 	if err != nil && err != context.Canceled {
 		fmt.Fprintf(os.Stderr, "Provider error: %v\n", err)
 		os.Exit(1)

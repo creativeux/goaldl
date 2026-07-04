@@ -37,34 +37,35 @@ goaldl ports
 goaldl record -p /dev/cu.usbserial-10 -t 60 -o drive_4800.raw
 goaldl decode drive_4800.raw -o frames.csv
 
-# Live real-time decode straight from the vehicle
-goaldl decode -p /dev/cu.usbserial-10 -o live.csv
+# Live sensor table straight from the vehicle — optionally record raw and log decoded CSV
+goaldl monitor -p /dev/cu.usbserial-10 -o session.raw -csv live.csv
+
+# Replay a capture as a live-updating table
+goaldl monitor drive_4800.raw
 
 # Generate a synthetic capture to exercise the decoder without hardware
 goaldl simulate -n 10 && goaldl decode aldl_sim_4800.raw
-
-# Parse / convert an existing hex capture file
-goaldl test data/varied_sensors.hex
-goaldl convert data/varied_sensors.hex -o output.csv
 
 # List supported ECMs
 goaldl ecms
 ```
 
 The recommended workflow is **record then decode**: capture raw bytes once at
-the car, then develop and re-run the decoder offline against that file as many
-times as you like. `decode -p` is available for live monitoring.
+the car, then re-run `decode`/`monitor` offline against that file as many times
+as you like. For live use, `monitor -p` shows the table and can record raw
+(`-o`) and log decoded CSV (`-csv`) at the same time.
 
 ## Project layout
 
 ```
-cmd/goaldl/            CLI: main.go (ports/ecms/test/convert) + capture.go (record/decode/simulate)
+cmd/goaldl/            CLI: main.go (ports/ecms) + capture.go (record/decode/simulate)
+                       + monitor.go (live table) + csv.go (shared CSV writer)
 pkg/decoder/           The decoder (byte-value state machine) + synthetic encoder + tests
     testdata/          Real raw captures + golden frame dumps — the root of the test suite
+pkg/stream/            Provider abstraction (replay + serial) feeding the live sensor table
 pkg/ecm/               ECM definitions and frame parsing (GM 1227747 per A033.ads)
 pkg/serial/            Thin serial-port wrapper (open/read/flush/list) — no decoding
 pkg/aldl/              Shared Frame type
-pkg/logging/           CSV/JSON/raw/hex loggers
 pkg/errors/            Error types
 data/                  Reference captures and A033.ads ECM definition
 docs/history/          Superseded debugging notes, kept for context

@@ -146,7 +146,6 @@ func printHistogram(histogram map[byte]int64, total int64) {
 // sensor values.
 func cmdDecode() {
 	fs := flag.NewFlagSet("decode", flag.ExitOnError)
-	portName := fs.String("p", "", "Decode live from this serial port instead of a file")
 	baudRate := fs.Int("b", 4800, "UART sampling baud rate the capture was recorded at")
 	ecmPart := fs.String("e", defaultECM, "ECM part number")
 	output := fs.String("o", "", "Write decoded frames to CSV file")
@@ -155,13 +154,8 @@ func cmdDecode() {
 	verbose := fs.Bool("v", false, "Print every frame instead of the first 5")
 	fs.Parse(os.Args[2:])
 
-	if *portName != "" {
-		liveDecode(*portName, *baudRate, *ecmPart, *output, *promID, *invert)
-		return
-	}
-
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: goaldl decode <capture.raw> [-b baud] [-o out.csv], or goaldl decode -p <port>")
+		fmt.Fprintln(os.Stderr, "Usage: goaldl decode <capture.raw> [-b baud] [-o out.csv]  (live: goaldl monitor -p <port>)")
 		os.Exit(1)
 	}
 	inName := fs.Arg(0)
@@ -225,19 +219,14 @@ func cmdDecode() {
 		fmt.Printf("PROM ID %d matched in %d/%d frames\n", *promID, promMatches, len(frames))
 	}
 
-	var csv *os.File
+	var csv *frameCSV
 	if *output != "" {
-		csv, err = os.Create(*output)
+		csv, err = newFrameCSV(*output, def)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating %s: %v\n", *output, err)
 			os.Exit(1)
 		}
 		defer csv.Close()
-		fmt.Fprint(csv, "time_sec,byte_offset,prom_ok")
-		for _, p := range def.Parameters {
-			fmt.Fprintf(csv, ",%s", p.Name)
-		}
-		fmt.Fprintln(csv)
 	}
 
 	shown := 0
@@ -249,11 +238,7 @@ func cmdDecode() {
 
 		data, perr := registry.ParseFrame(&aldl.Frame{Data: f.Data, Timestamp: time.Time{}}, *ecmPart)
 		if csv != nil && perr == nil {
-			fmt.Fprintf(csv, "%.2f,%d,%v", tSec, f.ByteOffset, promOK)
-			for _, p := range def.Parameters {
-				fmt.Fprintf(csv, ",%.2f", data.ParsedValues[p.Name])
-			}
-			fmt.Fprintln(csv)
+			csv.Write(tSec, f.ByteOffset, promOK, data.ParsedValues)
 		}
 
 		if !*verbose && shown >= 5 {
@@ -280,99 +265,6 @@ func cmdDecode() {
 	}
 	if *output != "" {
 		fmt.Printf("\nWrote %d frames to %s\n", len(frames), *output)
-	}
-}
-
-// liveDecode streams bytes from a serial port through the decoder, printing
-// each frame as it completes. Ctrl+C stops and prints stats.
-func liveDecode(portName string, baudRate int, ecmPart, output string, promID int, invert bool) {
-	ser, err := serial.NewWithBaudRate(portName, baudRate)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening port: %v\n", err)
-		os.Exit(1)
-	}
-	defer ser.Close()
-	if err := ser.ResetInputBuffer(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not flush input buffer: %v\n", err)
-	}
-
-	registry := ecm.NewRegistry()
-	def, ok := registry.GetDefinition(ecmPart)
-	if !ok {
-		fmt.Fprintf(os.Stderr, "Unknown ECM: %s\n", ecmPart)
-		os.Exit(1)
-	}
-
-	var csv *os.File
-	if output != "" {
-		csv, err = os.Create(output)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating %s: %v\n", output, err)
-			os.Exit(1)
-		}
-		defer csv.Close()
-		fmt.Fprint(csv, "time_sec,byte_offset,prom_ok")
-		for _, p := range def.Parameters {
-			fmt.Fprintf(csv, ",%s", p.Name)
-		}
-		fmt.Fprintln(csv)
-	}
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-
-	fmt.Printf("Live decoding from %s at %d baud (Ctrl+C to stop)...\n", portName, baudRate)
-	d := decoder.New(decoder.Config{BaudRate: baudRate, FrameSize: 20, SyncBits: 9, Invert: invert})
-	buf := make([]byte, 512)
-	start := time.Now()
-	count := 0
-
-live:
-	for {
-		select {
-		case <-sigCh:
-			break live
-		default:
-		}
-		n, err := ser.Read(buf)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "\nRead error: %v\n", err)
-			break
-		}
-		for _, b := range buf[:n] {
-			f := d.Feed(b)
-			if f == nil {
-				continue
-			}
-			tSec := time.Since(start).Seconds()
-			promOK := promID == 0 || frameProm(f.Data) == promID
-			data, perr := registry.ParseFrame(&aldl.Frame{Data: f.Data, Timestamp: time.Now()}, ecmPart)
-			if perr != nil {
-				fmt.Printf("[%6.1fs] frame %d PROM %s parse error: %v\n", tSec, count, boolMark(promOK), perr)
-			} else {
-				fmt.Printf("[%6.1fs] PROM %s | RPM %4.0f | Coolant %5.1f°F | MAP %.2fV | TPS %.2fV | O2 %4.0fmV | Batt %.1fV | BLM %3.0f | INT %3.0f\n",
-					tSec, boolMark(promOK),
-					data.ParsedValues["engine_rpm"], data.ParsedValues["coolant_temp"],
-					data.ParsedValues["map_voltage"], data.ParsedValues["tps_voltage"],
-					data.ParsedValues["oxygen_sensor"], data.ParsedValues["battery_voltage"],
-					data.ParsedValues["blm"], data.ParsedValues["integrator"])
-				if csv != nil {
-					fmt.Fprintf(csv, "%.2f,%d,%v", tSec, f.ByteOffset, promOK)
-					for _, p := range def.Parameters {
-						fmt.Fprintf(csv, ",%.2f", data.ParsedValues[p.Name])
-					}
-					fmt.Fprintln(csv)
-				}
-			}
-			count++
-		}
-	}
-
-	s := d.Stats
-	fmt.Printf("\nStopped after %.1fs: %d frames (%d syncs, %d aborted, %d noisy bytes)\n",
-		time.Since(start).Seconds(), s.FramesEmitted, s.SyncsFound, s.FramesAborted, s.NoisyBytes)
-	if csv != nil {
-		fmt.Printf("Wrote %d frames to %s\n", count, output)
 	}
 }
 
