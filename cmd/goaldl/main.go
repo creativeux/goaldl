@@ -27,6 +27,8 @@ func main() {
 		cmdSimulate()
 	case "monitor":
 		cmdMonitor()
+	case "blm":
+		cmdBLM()
 	case "ports":
 		cmdPorts()
 	case "ecms":
@@ -47,6 +49,7 @@ func printUsage() {
 	fmt.Println("  record             Capture raw UART bytes to a file (no processing)")
 	fmt.Println("  monitor            Live sensor table from a port (-p) or a replayed capture file")
 	fmt.Println("  decode             Decode a capture file to frames + optional CSV")
+	fmt.Println("  blm                Build a BLM fuel-trim table (rich/lean by RPM and load) from a capture")
 	fmt.Println("  simulate           Generate a synthetic capture for testing decode")
 	fmt.Println("  ports              List available USB serial ports")
 	fmt.Println("  ecms               List supported ECM part numbers")

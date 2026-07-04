@@ -15,6 +15,7 @@ goaldl is a cross-platform Go implementation of an ALDL (Assembly Line Diagnosti
 - `go run ./cmd/goaldl monitor pkg/decoder/testdata/drive_4800.raw` - Live sensor table (sensor / raw / value), replaying a capture
 - `go run ./cmd/goaldl monitor -p /dev/cu.usbserial-10 -o session.raw -csv live.csv` - Same table live from the ECM; `-o` records raw, `-csv` logs decoded frames (this is the live datalogger — replaces the old `scan`/`log`)
 - `go run ./cmd/goaldl decode session.raw -o frames.csv` - Batch-decode a capture file to frames + CSV (offline only; use `monitor -p` for live)
+- `go run ./cmd/goaldl blm session.raw -o correction.csv` - Build the BLM fuel-trim table (rich/lean by RPM × load) from a capture
 - `go run ./cmd/goaldl simulate -n 10` - Generate a synthetic capture for testing decode without hardware
 - `go test ./pkg/decoder -run TestGolden -update` - Regenerate golden files after an intended decoder change (review the diff before committing)
 
@@ -28,6 +29,7 @@ The codebase was consolidated (2026-07-03) down to the working core; all experim
   - `testdata/` - real raw captures (`idle_4800.raw`, `drive_4800.raw`) as committed fixtures, plus their `.golden` frame dumps. These are the root of the test suite.
 - `cmd/goaldl/` - CLI: `main.go` (ports/ecms) + `capture.go` (record/decode/simulate) + `monitor.go` (live table) + `csv.go` (shared `frameCSV` writer used by decode and monitor)
 - `pkg/stream/` - Provider abstraction feeding a live sensor table: `ReplayProvider` (from a capture file) and `SerialProvider` (live ECM, with optional raw recording) drive the same `Renderer`. `BuildRows` (pure) and the providers are unit-tested against the drive fixture.
+- `pkg/blm/` - BLM (Block Learn Multiplier / long-term fuel trim) accumulator: bins readings into an RPM × MAP grid and emits Latest/Average/Samples/Correction tables (matching `data/20250601_162123_BLM.txt`). Correction = avg_BLM/128. The `blm` command gates on closed-loop + block-learn-enabled (MWAF1 offset 14, bit 7 = closed loop, bit 1 = BLM enable) before recording. **Two assumptions to verify vs WinALDL:** the MAP-volts→kPa transfer in `cmd/goaldl/blm.go` (`mapVoltsToKPa`), and whether the reference file's "Narrow/Wide" split (+ Avg10/StdDev) is wanted — deferred pending its exact criterion.
 - `pkg/ecm/` - ECM definitions and frame parsing (GM 1227747 per A033.ads; byte order verified against the WinALDL log)
 - `pkg/serial/serial.go` - thin serial-port wrapper (`go.bug.st/serial`): open/read/flush/list. No decoding.
 - `pkg/aldl/aldl.go` - just the shared `Frame` type
