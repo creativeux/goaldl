@@ -66,7 +66,9 @@ func cmdTUI(args []string) {
 	// Run the session in the background, delivering snapshots over a channel.
 	// The emit blocks on the channel, so the session is paced by the UI.
 	ctx, cancel := context.WithCancel(context.Background())
-	snaps := make(chan stream.Snapshot)
+	// Small buffer so a briefly-stalled terminal (slow SSH, flow control) can't
+	// block the session goroutine from draining the UART and dropping bytes.
+	snaps := make(chan stream.Snapshot, 8)
 	go func() {
 		session.Run(ctx, func(s stream.Snapshot) {
 			select {

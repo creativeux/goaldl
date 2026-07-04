@@ -13,6 +13,15 @@ const (
 	ftBitClosedLoop = 7 // MWAF1 bit 7: loop status (1 = CLOSED)
 )
 
+// FramePROM reads the 16-bit PROM ID from a decoded frame (bytes 1-2, big
+// endian, GM 1227747 layout), or -1 if the frame is too short.
+func FramePROM(frame []byte) int {
+	if len(frame) < 3 {
+		return -1
+	}
+	return int(frame[1])<<8 | int(frame[2])
+}
+
 // FuelTrim is one frame's fuel-trim state.
 type FuelTrim struct {
 	RPM        float64

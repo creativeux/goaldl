@@ -15,6 +15,7 @@ import (
 type Snapshot struct {
 	FrameEvent                    // frame, index, elapsed
 	PROMOK     bool               // frame's PROM ID matched the expected one
+	ParseOK    bool               // sensors were parsed successfully (else Sensors is empty)
 	Sensors    map[string]float64 // parsed engineering values by parameter name
 	FuelTrim   ecm.FuelTrim       // RPM/MAP/BLM + closed-loop gating for BLM work
 }
@@ -52,21 +53,15 @@ func (s *Session) Run(ctx context.Context, emit func(Snapshot)) error {
 
 func (s *Session) snapshot(ev FrameEvent) Snapshot {
 	sensors := map[string]float64{}
-	if data, err := s.registry.ParseFrame(&aldl.Frame{Data: ev.Frame.Data}, s.ecmPart); err == nil {
+	data, err := s.registry.ParseFrame(&aldl.Frame{Data: ev.Frame.Data}, s.ecmPart)
+	if err == nil {
 		sensors = data.ParsedValues
 	}
 	return Snapshot{
 		FrameEvent: ev,
-		PROMOK:     s.promID == 0 || promOf(ev.Frame.Data) == s.promID,
+		PROMOK:     s.promID == 0 || ecm.FramePROM(ev.Frame.Data) == s.promID,
+		ParseOK:    err == nil,
 		Sensors:    sensors,
 		FuelTrim:   ecm.FuelTrimSample(ev.Frame.Data),
 	}
-}
-
-// promOf reads the 16-bit PROM ID from a frame (bytes 1-2), or -1 if too short.
-func promOf(data []byte) int {
-	if len(data) < 3 {
-		return -1
-	}
-	return int(data[1])<<8 | int(data[2])
 }

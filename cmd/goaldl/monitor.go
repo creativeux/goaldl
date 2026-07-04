@@ -107,7 +107,7 @@ func cmdMonitor(args []string) {
 		frames++
 		renderer.Render(ev)
 		if csv != nil {
-			promOK := *promID == 0 || frameProm(ev.Frame.Data) == *promID
+			promOK := *promID == 0 || ecm.FramePROM(ev.Frame.Data) == *promID
 			if data, perr := registry.ParseFrame(&aldl.Frame{Data: ev.Frame.Data}, *ecmPart); perr == nil {
 				csv.Write(ev.Elapsed.Seconds(), ev.Frame.ByteOffset, promOK, data.ParsedValues)
 			}

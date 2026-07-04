@@ -211,7 +211,7 @@ func cmdDecode(args []string) {
 
 	promMatches := 0
 	for _, f := range frames {
-		if frameProm(f.Data) == *promID {
+		if ecm.FramePROM(f.Data) == *promID {
 			promMatches++
 		}
 	}
@@ -234,7 +234,7 @@ func cmdDecode(args []string) {
 		// Each capture byte is one ALDL bit at 160 bps, so the stream
 		// position converts directly to elapsed seconds.
 		tSec := float64(f.ByteOffset) / 160.0
-		promOK := *promID == 0 || frameProm(f.Data) == *promID
+		promOK := *promID == 0 || ecm.FramePROM(f.Data) == *promID
 
 		data, perr := registry.ParseFrame(&aldl.Frame{Data: f.Data, Timestamp: time.Time{}}, *ecmPart)
 		if csv != nil && perr == nil {
@@ -266,10 +266,6 @@ func cmdDecode(args []string) {
 	if *output != "" {
 		fmt.Printf("\nWrote %d frames to %s\n", len(frames), *output)
 	}
-}
-
-func frameProm(data []byte) int {
-	return int(data[1])<<8 | int(data[2])
 }
 
 func boolMark(ok bool) string {
