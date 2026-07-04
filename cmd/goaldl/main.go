@@ -15,9 +15,31 @@ const (
 func main() {
 	args := os.Args[1:]
 	if len(args) > 0 {
+		// A known command word runs that command; anything else (a flag, a
+		// capture-file path, or nothing) is the dashboard. Files are *.raw, so
+		// a positional that collides with a command name never happens in
+		// practice — and `goaldl ./name` still resolves as a file.
 		switch args[0] {
-		case "cli":
-			runCLI(args[1:])
+		case "record":
+			cmdRecord(args[1:])
+			return
+		case "decode":
+			cmdDecode(args[1:])
+			return
+		case "monitor":
+			cmdMonitor(args[1:])
+			return
+		case "blm":
+			cmdBLM(args[1:])
+			return
+		case "simulate":
+			cmdSimulate(args[1:])
+			return
+		case "ports":
+			cmdPorts()
+			return
+		case "ecms":
+			cmdECMs()
 			return
 		case "help", "-h", "--help":
 			printUsage()
@@ -40,35 +62,6 @@ func launchTUI(args []string) {
 	cmdTUI(args)
 }
 
-// runCLI dispatches the scripting/headless commands, kept under a "cli"
-// namespace so the dashboard can own the bare `goaldl` invocation.
-func runCLI(args []string) {
-	if len(args) == 0 {
-		printCLIUsage()
-		os.Exit(1)
-	}
-	switch args[0] {
-	case "record":
-		cmdRecord(args[1:])
-	case "decode":
-		cmdDecode(args[1:])
-	case "monitor":
-		cmdMonitor(args[1:])
-	case "blm":
-		cmdBLM(args[1:])
-	case "simulate":
-		cmdSimulate(args[1:])
-	case "ports":
-		cmdPorts()
-	case "ecms":
-		cmdECMs()
-	default:
-		fmt.Fprintf(os.Stderr, "Unknown command: goaldl cli %s\n", args[0])
-		printCLIUsage()
-		os.Exit(1)
-	}
-}
-
 func printUsage() {
 	fmt.Println("goaldl - ALDL scanner and datalogger for GM ECMs")
 	fmt.Println()
@@ -78,32 +71,20 @@ func printUsage() {
 	fmt.Println("  goaldl                             auto-connect if one USB serial port is present")
 	fmt.Println("  keys: 1-3 / tab switch views · q quit")
 	fmt.Println()
-	fmt.Println("Scripting / headless commands live under 'cli':")
-	fmt.Println("  goaldl cli ports                          list serial ports")
-	fmt.Println("  goaldl cli record -p <port> -t 60 -o session.raw")
-	fmt.Println("  goaldl cli decode session.raw -o frames.csv")
-	fmt.Println("  goaldl cli blm session.raw -o correction.csv")
-	fmt.Println("  goaldl cli                                list all cli commands")
-	fmt.Println()
-	fmt.Println("  goaldl help                               this help")
-}
-
-func printCLIUsage() {
-	fmt.Println("goaldl cli - scripting and headless commands")
-	fmt.Println()
+	fmt.Println("Commands (scripting / headless):")
 	fmt.Println("  record     Capture raw UART bytes to a file (no processing)")
 	fmt.Println("  decode     Decode a capture file to frames + optional CSV")
-	fmt.Println("  monitor    Live/replay sensor or BLM table (streaming, non-interactive)")
+	fmt.Println("  monitor    Streaming sensor or BLM table (non-interactive)")
 	fmt.Println("  blm        Build a BLM fuel-trim table (rich/lean by RPM and load)")
 	fmt.Println("  simulate   Generate a synthetic capture for testing decode")
 	fmt.Println("  ports      List available USB serial ports")
 	fmt.Println("  ecms       List supported ECM part numbers")
 	fmt.Println()
 	fmt.Println("Examples:")
-	fmt.Println("  goaldl cli record -p /dev/cu.usbserial-10 -t 60 -o session.raw")
-	fmt.Println("  goaldl cli decode session.raw -o frames.csv")
-	fmt.Println("  goaldl cli blm session.raw -o correction.csv")
-	fmt.Println("  goaldl cli simulate -n 10 && goaldl cli decode aldl_sim_4800.raw")
+	fmt.Println("  goaldl ports")
+	fmt.Println("  goaldl record -p /dev/cu.usbserial-10 -t 60 -o session.raw")
+	fmt.Println("  goaldl decode session.raw -o frames.csv")
+	fmt.Println("  goaldl blm session.raw -o correction.csv")
 }
 
 // cmdPorts lists available serial ports.

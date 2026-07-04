@@ -48,7 +48,7 @@ func cmdTUI(args []string) {
 			fmt.Fprintln(os.Stderr, "No source. Give a port or a capture file:")
 			fmt.Fprintln(os.Stderr, "  goaldl -p /dev/cu.usbserial-10")
 			fmt.Fprintln(os.Stderr, "  goaldl drive_4800.raw")
-			fmt.Fprintln(os.Stderr, "\nScripting commands live under 'goaldl cli' (try: goaldl cli ports).")
+			fmt.Fprintln(os.Stderr, "\nSee 'goaldl help' for the scripting commands (ports, record, decode, blm, …).")
 			os.Exit(1)
 		}
 		inName := fs.Arg(0)
