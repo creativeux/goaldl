@@ -49,40 +49,52 @@ func TestReplayProviderEmitsAllFrames(t *testing.T) {
 	}
 }
 
-// TestReplayProviderPacing: a virtual clock proves frames are released at the
-// times implied by their byte offsets, without real sleeping.
+// TestReplayProviderPacing uses a virtual clock to prove two things across
+// speeds: (1) each frame's Elapsed equals its data-timeline position (byte
+// offset / 160), independent of speed; (2) the wall clock advances by that
+// data time divided by speed — i.e. speed compresses playback, not the
+// reported time.
 func TestReplayProviderPacing(t *testing.T) {
 	data := driveCapture(t)
 	cfg := decoder.DefaultConfig()
-
-	var vclock time.Duration
-	base := time.Unix(0, 0)
-	p := &ReplayProvider{
-		Data: data, Config: cfg, Speed: 1.0,
-		now:   func() time.Time { return base.Add(vclock) },
-		sleep: func(_ context.Context, d time.Duration) error { vclock += d; return nil },
-	}
-
 	frames := decoder.New(cfg).Decode(data)
-	var lastElapsed time.Duration
-	i := 0
-	err := p.Run(context.Background(), func(ev FrameEvent) {
-		// Elapsed must be monotonic and track the frame's original capture time.
-		if ev.Elapsed < lastElapsed {
-			t.Errorf("frame %d elapsed went backwards: %v < %v", ev.Index, ev.Elapsed, lastElapsed)
-		}
-		wantAt := time.Duration(float64(frames[ev.Index].ByteOffset) / 160.0 * float64(time.Second))
-		if ev.Elapsed < wantAt-time.Millisecond {
-			t.Errorf("frame %d released at %v, before its capture time %v", ev.Index, ev.Elapsed, wantAt)
-		}
-		lastElapsed = ev.Elapsed
-		i++
-	})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	dataTime := func(i int) time.Duration {
+		return time.Duration(float64(frames[i].ByteOffset) / 160.0 * float64(time.Second))
 	}
-	if i != len(frames) {
-		t.Fatalf("emitted %d frames, want %d", i, len(frames))
+
+	for _, speed := range []float64{1.0, 5.0} {
+		var vclock time.Duration
+		base := time.Unix(0, 0)
+		p := &ReplayProvider{
+			Data: data, Config: cfg, Speed: speed,
+			now:   func() time.Time { return base.Add(vclock) },
+			sleep: func(_ context.Context, d time.Duration) error { vclock += d; return nil },
+		}
+
+		var lastElapsed time.Duration
+		i := 0
+		err := p.Run(context.Background(), func(ev FrameEvent) {
+			if ev.Elapsed != dataTime(ev.Index) {
+				t.Errorf("speed %v frame %d: Elapsed = %v, want data time %v",
+					speed, ev.Index, ev.Elapsed, dataTime(ev.Index))
+			}
+			if ev.Elapsed < lastElapsed {
+				t.Errorf("speed %v frame %d: elapsed went backwards", speed, ev.Index)
+			}
+			lastElapsed = ev.Elapsed
+			i++
+		})
+		if err != nil {
+			t.Fatalf("speed %v Run: %v", speed, err)
+		}
+		if i != len(frames) {
+			t.Fatalf("speed %v: emitted %d frames, want %d", speed, i, len(frames))
+		}
+		// Wall clock (sum of sleeps) should be the last frame's data time / speed.
+		wantWall := time.Duration(float64(dataTime(len(frames)-1)) / speed)
+		if diff := vclock - wantWall; diff < -time.Millisecond || diff > time.Millisecond {
+			t.Errorf("speed %v: wall clock advanced %v, want ~%v", speed, vclock, wantWall)
+		}
 	}
 }
 

@@ -11,8 +11,14 @@ import (
 	"goaldl/pkg/decoder"
 )
 
-// FrameEvent is one decoded frame delivered to a consumer, with the wall-clock
-// time elapsed since the stream started and its sequence index.
+// FrameEvent is one decoded frame delivered to a consumer, with its position
+// in the data timeline and its sequence index.
+//
+// Elapsed is the frame's time within the recording (for replay) or since the
+// stream started (for live) — NOT how long playback has been running. For a
+// replay at 5x speed, a frame captured at t=50s reports Elapsed=50s even
+// though only 10s of wall-clock have passed. This keeps the displayed time and
+// the exported CSV aligned with the source data regardless of playback speed.
 type FrameEvent struct {
 	Frame   decoder.Frame
 	Index   int

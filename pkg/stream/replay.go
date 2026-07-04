@@ -42,10 +42,14 @@ func (p *ReplayProvider) Run(ctx context.Context, emit func(FrameEvent)) error {
 	frames := decoder.New(p.Config).Decode(p.Data)
 	start := now()
 	for i, f := range frames {
+		// Each capture byte is one ALDL bit at 160 bps, so a frame's byte
+		// offset maps directly to its position in the original recording.
+		// This is what the consumer sees as Elapsed — the data timeline, not
+		// how long playback has been running — so it is independent of Speed.
+		dataElapsed := time.Duration(float64(f.ByteOffset) / 160.0 * float64(time.Second))
 		if p.Speed > 0 {
-			// Each capture byte is one ALDL bit at 160 bps, so a frame's byte
-			// offset maps directly to its original capture time.
-			target := time.Duration(float64(f.ByteOffset) / 160.0 / p.Speed * float64(time.Second))
+			// Speed only compresses the wall-clock wait between frames.
+			target := time.Duration(float64(dataElapsed) / p.Speed)
 			if wait := target - now().Sub(start); wait > 0 {
 				if err := sleep(ctx, wait); err != nil {
 					return err
@@ -55,7 +59,7 @@ func (p *ReplayProvider) Run(ctx context.Context, emit func(FrameEvent)) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		emit(FrameEvent{Frame: f, Index: i, Elapsed: now().Sub(start)})
+		emit(FrameEvent{Frame: f, Index: i, Elapsed: dataElapsed})
 	}
 	return nil
 }
