@@ -139,87 +139,32 @@ func (r *Registry) extractParameterValue(data []byte, param *Parameter) (float64
 	return raw*param.Factor + param.Bias, nil
 }
 
-// coolantTempLookup converts a raw coolant-temperature byte to °F using the
-// A033.ads thermistor table. The breakpoints are ascending and contiguous
-// (they tile 0-255 with no gaps), so each case needs only its upper bound —
-// the lower bound is guaranteed by the earlier cases having been excluded.
+// coolantTempTable is the GM 1227747 (A033.ads) coolant thermistor curve as
+// data: each entry is the inclusive upper raw count of a range and the °F it
+// maps to, ascending. The °F column steps by a constant 9° (except the final
+// entry) but the raw ranges widen toward the middle — thermistor nonlinearity —
+// so the mapping can't be reduced to a formula and is expressed as a table.
+var coolantTempTable = []struct {
+	maxRaw byte
+	degF   float64
+}{
+	{12, 302}, {13, 293}, {14, 284}, {17, 275}, {20, 266}, {22, 257},
+	{25, 248}, {29, 239}, {33, 230}, {38, 221}, {43, 212}, {49, 203},
+	{55, 194}, {63, 185}, {71, 176}, {80, 167}, {91, 158}, {101, 149},
+	{113, 140}, {125, 131}, {138, 122}, {151, 113}, {164, 104}, {176, 95},
+	{188, 86}, {198, 77}, {208, 68}, {217, 59}, {224, 50}, {230, 41},
+	{236, 32}, {240, 23}, {244, 14}, {246, 5}, {249, -4}, {250, -13},
+	{252, -22}, {255, -40},
+}
+
+// coolantTempLookup returns the °F for a raw coolant byte: the value of the
+// first range whose upper bound the raw count does not exceed. The final entry
+// covers 255, so a valid byte always matches.
 func coolantTempLookup(rawValue byte) float64 {
-	switch {
-	case rawValue <= 12:
-		return 302.0
-	case rawValue <= 13:
-		return 293.0
-	case rawValue <= 14:
-		return 284.0
-	case rawValue <= 17:
-		return 275.0
-	case rawValue <= 20:
-		return 266.0
-	case rawValue <= 22:
-		return 257.0
-	case rawValue <= 25:
-		return 248.0
-	case rawValue <= 29:
-		return 239.0
-	case rawValue <= 33:
-		return 230.0
-	case rawValue <= 38:
-		return 221.0
-	case rawValue <= 43:
-		return 212.0
-	case rawValue <= 49:
-		return 203.0
-	case rawValue <= 55:
-		return 194.0
-	case rawValue <= 63:
-		return 185.0
-	case rawValue <= 71:
-		return 176.0
-	case rawValue <= 80:
-		return 167.0
-	case rawValue <= 91:
-		return 158.0
-	case rawValue <= 101:
-		return 149.0
-	case rawValue <= 113:
-		return 140.0
-	case rawValue <= 125:
-		return 131.0
-	case rawValue <= 138:
-		return 122.0
-	case rawValue <= 151:
-		return 113.0
-	case rawValue <= 164:
-		return 104.0
-	case rawValue <= 176:
-		return 95.0
-	case rawValue <= 188:
-		return 86.0
-	case rawValue <= 198:
-		return 77.0
-	case rawValue <= 208:
-		return 68.0
-	case rawValue <= 217:
-		return 59.0
-	case rawValue <= 224:
-		return 50.0
-	case rawValue <= 230:
-		return 41.0
-	case rawValue <= 236:
-		return 32.0
-	case rawValue <= 240:
-		return 23.0
-	case rawValue <= 244:
-		return 14.0
-	case rawValue <= 246:
-		return 5.0
-	case rawValue <= 249:
-		return -4.0
-	case rawValue <= 250:
-		return -13.0
-	case rawValue <= 252:
-		return -22.0
-	default:
-		return -40.0
+	for _, e := range coolantTempTable {
+		if rawValue <= e.maxRaw {
+			return e.degF
+		}
 	}
+	return coolantTempTable[len(coolantTempTable)-1].degF
 }
