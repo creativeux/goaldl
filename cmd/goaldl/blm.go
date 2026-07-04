@@ -7,29 +7,8 @@ import (
 
 	"goaldl/pkg/blm"
 	"goaldl/pkg/decoder"
+	"goaldl/pkg/ecm"
 )
-
-// GM 1227747 (A033) frame offsets and MWAF1 flag bits, per data/A033.ads.
-const (
-	offMAP   = 6  // MAP sensor, raw byte; volts = raw * 0.0196
-	offRPM   = 7  // engine speed; RPM = raw * 25
-	offMWAF1 = 14 // mode/status word carrying the closed-loop and BLM-enable bits
-	offBLM   = 18 // Block Learn Multiplier
-
-	bitBLMEnable  = 1 // MWAF1 bit 1: block learn enabled
-	bitClosedLoop = 7 // MWAF1 bit 7: loop status (1 = CLOSED)
-)
-
-// mapVoltsToKPa converts the A033 MAP sensor voltage to manifold pressure.
-//
-// ASSUMPTION — VERIFY against WinALDL: A033.ads reports MAP only in volts, so
-// this uses the standard GM 1-bar MAP transfer (~1V≈20 kPa idle vacuum,
-// ~4.9V≈105 kPa near WOT). If your WinALDL kPa column disagrees, adjust the
-// slope/offset here; the binning and correction math are unaffected.
-func mapVoltsToKPa(v float64) float64 {
-	const slope, offset = 21.25, -1.25
-	return slope*v + offset
-}
 
 // cmdBLM builds a BLM (fuel-trim) table from a capture, showing where the tune
 // runs rich or lean across RPM and load. It records every closed-loop,
@@ -67,20 +46,15 @@ func cmdBLM() {
 	grid := blm.NewDefault()
 	var openLoop, blmOff int
 	for _, f := range frames {
-		mwaf1 := f.Data[offMWAF1]
-		closedLoop := (mwaf1>>bitClosedLoop)&1 == 1
-		blmEnabled := (mwaf1>>bitBLMEnable)&1 == 1
-		if !closedLoop {
+		ft := ecm.FuelTrimSample(f.Data)
+		switch {
+		case !ft.ClosedLoop:
 			openLoop++
-			continue
-		}
-		if !blmEnabled {
+		case !ft.BLMEnabled:
 			blmOff++
-			continue
+		default:
+			grid.Add(ft.RPM, ft.MapKPa, ft.BLM)
 		}
-		rpm := float64(f.Data[offRPM]) * 25
-		mapKPa := mapVoltsToKPa(float64(f.Data[offMAP]) * 0.0196)
-		grid.Add(rpm, mapKPa, float64(f.Data[offBLM]))
 	}
 
 	fmt.Printf("Decoded %d frames from %s\n", len(frames), inName)

@@ -77,11 +77,15 @@ func absf(x float64) float64 {
 	return x
 }
 
+// Cell returns the row and column indices the given RPM and load bin to.
+func (g *Grid) Cell(rpm, load float64) (row, col int) {
+	return nearest(g.RPM, rpm), nearest(g.MAP, load)
+}
+
 // Add records one BLM reading at the given RPM and load, binning it into the
 // nearest cell.
 func (g *Grid) Add(rpm, load, blm float64) {
-	r := nearest(g.RPM, rpm)
-	c := nearest(g.MAP, load)
+	r, c := g.Cell(rpm, load)
 	cell := &g.cells[r][c]
 	cell.count++
 	cell.sum += blm

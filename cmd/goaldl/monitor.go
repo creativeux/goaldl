@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"goaldl/pkg/aldl"
@@ -28,7 +29,8 @@ func cmdMonitor() {
 	promID := fs.Int("prom", 6291, "Expected PROM ID for the sync indicator (0 to disable)")
 	invert := fs.Bool("invert", false, "Invert byte values (non-inverting cable)")
 	record := fs.String("o", "", "Live only: also record raw bytes to this file")
-	csvOut := fs.String("csv", "", "Also export decoded frames to this CSV file")
+	csvOut := fs.String("csv", "", "Also export decoded frames to this CSV file (sensor view)")
+	blmView := fs.Bool("blm", false, "Show a live BLM fuel-trim grid instead of the sensor table")
 	speed := fs.Float64("speed", 1.0, "Replay only: playback speed (1=real time, 0=as fast as possible)")
 	fs.Parse(os.Args[2:])
 
@@ -75,8 +77,17 @@ func cmdMonitor() {
 		title = "goaldl monitor — replay " + inName
 	}
 
-	// CSV export is created after the replay branch re-parses trailing flags,
-	// so `monitor <file> -csv out.csv` is honored.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if *blmView {
+		runBLMView(ctx, provider, "goaldl BLM — "+strings.TrimPrefix(title, "goaldl monitor — "))
+		return
+	}
+
+	// Sensor-table view with optional CSV export. CSV is created after the
+	// replay branch re-parses trailing flags, so `monitor <file> -csv out.csv`
+	// is honored.
 	var csv *frameCSV
 	if *csvOut != "" {
 		c, err := newFrameCSV(*csvOut, def)
@@ -87,9 +98,6 @@ func cmdMonitor() {
 		defer c.Close()
 		csv = c
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	renderer := stream.NewRenderer(os.Stdout, isTTY(os.Stdout), registry, *ecmPart, *promID, title)
 	var frames int
@@ -111,6 +119,21 @@ func cmdMonitor() {
 		fmt.Fprintf(os.Stderr, "Provider error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// runBLMView streams frames through a live BLM grid, then prints the final
+// Wide Average and Correction tables when the stream ends.
+func runBLMView(ctx context.Context, provider stream.Provider, title string) {
+	view := stream.NewBLMView(os.Stdout, isTTY(os.Stdout), title)
+	err := provider.Run(ctx, view.Render)
+	if err != nil && err != context.Canceled {
+		fmt.Fprintf(os.Stderr, "\nProvider error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("\n\nFinal — recorded %d closed-loop samples\n\n", view.Grid.TotalSamples())
+	fmt.Print(view.Grid.RenderFloat("Wide Average BLM (target 128; >128 lean, <128 rich)", view.Grid.Average(), 1))
+	fmt.Println()
+	fmt.Print(view.Grid.RenderFloat("Correction factor = avg/128 (multiply base VE/fuel by this)", view.Grid.Correction(), 3))
 }
 
 // isTTY reports whether f is an interactive terminal, so the renderer knows
