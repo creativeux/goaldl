@@ -1,6 +1,6 @@
 module goaldl
 
-go 1.21
+go 1.26
 
 require go.bug.st/serial v1.6.2
 
