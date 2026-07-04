@@ -18,10 +18,11 @@ import (
 
 // gridHeat renders a status line, the RPM×MAP heatmap (active cell at (ar,ac)
 // reverse-highlighted, cells below minCount dimmed as still-accumulating, "·"
-// for empty), and a legend. prec is the decimal precision per cell (0 for
-// BLM/INT counts, 3 for O2 volts). It reads the grid but never modifies it.
-func gridHeat(g *blm.Grid, ar, ac, minCount, prec int, status, legend string) string {
-	avg := g.Average()
+// for empty), and a legend. values is the per-cell number to show — Average()
+// for the trim/O2 grids, Sum() for spark knock counts. prec is the decimal
+// precision per cell (0 for BLM/INT counts, 2 for O2 volts). It reads the
+// grid but never modifies it.
+func gridHeat(g *blm.Grid, values [][]float64, ar, ac, minCount, prec int, status, legend string) string {
 	samples := g.Samples()
 
 	var b strings.Builder
@@ -39,9 +40,9 @@ func gridHeat(g *blm.Grid, ar, ac, minCount, prec int, status, legend string) st
 			case samples[r][c] == 0:
 				cellText = "    ·"
 			case samples[r][c] < minCount:
-				cellText = ansiDim + fmtCell(avg[r][c], prec) + ansiReset
+				cellText = ansiDim + fmtCell(values[r][c], prec) + ansiReset
 			default:
-				cellText = fmtCell(avg[r][c], prec)
+				cellText = fmtCell(values[r][c], prec)
 			}
 			if r == ar && c == ac {
 				cellText = "\033[7m" + strings.TrimPrefix(strings.TrimSuffix(cellText, ansiReset), ansiDim) + ansiReset
@@ -79,7 +80,7 @@ func INTBody(g *blm.Grid, ev FrameEvent, minCount int, intVal float64) string {
 		status = fmt.Sprintf("CLOSED LOOP  RPM %.0f  MAP %.0f kPa  INT %.0f%s",
 			ft.RPM, ft.MapKPa, intVal, prog)
 	}
-	return gridHeat(g, ar, ac, minCount, 0, status,
+	return gridHeat(g, g.Average(), ar, ac, minCount, 0, status,
 		"  target 128:  >128 adding fuel (lean), <128 removing (rich)")
 }
 
@@ -93,7 +94,22 @@ func O2Body(g *blm.Grid, ev FrameEvent, o2Volts float64) string {
 	ft := ecm.FuelTrimSample(ev.Frame.Data)
 	ar, ac := g.Cell(ft.RPM, ft.MapKPa)
 	status := fmt.Sprintf("O2 %.3f V  RPM %.0f  MAP %.0f kPa", o2Volts, ft.RPM, ft.MapKPa)
-	return gridHeat(g, ar, ac, 1, 2, status, "  volts; higher = richer exhaust; · = no data")
+	return gridHeat(g, g.Average(), ar, ac, 1, 2, status, "  volts; higher = richer exhaust; · = no data")
+}
+
+// SparkBody renders the knock-events grid: each cell is the total knocks
+// counted in that RPM×MAP cell this session (per-frame deltas of the
+// cumulative KNOCK_CNT byte, binned by the consumer). Ungated like O2 —
+// minCount is 1, cells never dim. Note the cells show the grid's Sum, not its
+// Average: a cell fed deltas 2 and 3 reads 5 knocks. knockCnt is the current
+// frame's raw counter, shown in the status line. (A mid-session counter reset
+// — ECM power cycle — appears as one spurious wrapped delta; accepted, same
+// failure mode as WinALDL.)
+func SparkBody(g *blm.Grid, ev FrameEvent, knockCnt float64) string {
+	ft := ecm.FuelTrimSample(ev.Frame.Data)
+	ar, ac := g.Cell(ft.RPM, ft.MapKPa)
+	status := fmt.Sprintf("KNOCK_CNT %.0f  RPM %.0f  MAP %.0f kPa", knockCnt, ft.RPM, ft.MapKPa)
+	return gridHeat(g, g.Sum(), ar, ac, 1, 0, status, "  knocks detected per cell this session; · = none")
 }
 
 // LoopBadge is the loop-state word: CLOSED LOOP / OPEN LOOP, or "LOOP —" before
@@ -113,8 +129,8 @@ func LoopBadge(ft ecm.FuelTrim, hasGood bool) string {
 // LoopStatus renders the persistent, plain-text loop/recording line shown under
 // the tab bar on every tab: the loop badge plus per-grid ● accumulating / ○
 // frozen markers, so the operator can tell from any tab whether the grid they
-// are on is live. O2 accumulates whenever a frame parses (ungated); BLM needs
-// closed loop + block-learn enabled; INT needs closed loop.
+// are on is live. O2 and SPARK accumulate whenever a frame parses (ungated);
+// BLM needs closed loop + block-learn enabled; INT needs closed loop.
 func LoopStatus(ft ecm.FuelTrim, hasGood bool) string {
 	dot := func(on bool) string {
 		if on {
@@ -133,6 +149,6 @@ func LoopStatus(ft ecm.FuelTrim, hasGood bool) string {
 	case hasGood && !ft.BLMEnabled:
 		suffix = "  (BLM disabled)"
 	}
-	return fmt.Sprintf("%s   rec: BLM %s INT %s O2 %s%s",
-		LoopBadge(ft, hasGood), dot(blmOn), dot(intOn), dot(o2On), suffix)
+	return fmt.Sprintf("%s   rec: BLM %s INT %s O2 %s SPARK %s%s",
+		LoopBadge(ft, hasGood), dot(blmOn), dot(intOn), dot(o2On), dot(o2On), suffix)
 }

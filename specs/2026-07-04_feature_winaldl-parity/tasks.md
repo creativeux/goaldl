@@ -30,3 +30,21 @@ Breakdown mirrors [spec-phase2.md](spec-phase2.md); user decisions 2026-07-04 (g
 - [x] 2.7 `cmd/goaldl/tui.go` save/clear: `s` → `saveGrids(".", time.Now(), …)` writes 3 timestamped files (`writeTrimGridFile` BLM/INT Samples+Avg+Correction; `writeO2File` O2 Samples+Avg 3dec); `c` context — grid tab clears that grid, Sensors resets extrema, else no-op
 - [x] 2.8 `cmd/goaldl/tui_test.go`: grid accumulation + open-loop freeze; clear isolation; save file headers (O2 has no correction); loop line holds lastGood across a bad frame; **end-to-end over the drive fixture** (BLM==469 cross-checks the blm command, INT>BLM, O2≥INT, all 7 tabs render); tab-switch + view tests updated for the new layout
 - [x] V: full suite green under `-race`; `go vet` + `gofmt` clean; decoder goldens byte-identical (`TestGolden` re-run, no `-update`); `monitor -blm` + `blm` command unchanged (469 recorded); dashboard driven end-to-end over the fixture in-test
+
+---
+
+# Tasks: WinALDL Parity Phase 3 (Session UX)
+
+Breakdown mirrors [spec-phase3.md](spec-phase3.md); user decisions 2026-07-04 (filename prompt on s/r/d · WinALDL spark axes · Spark tab 5). `Snapshot`/`Session`/`pkg/ecm` unchanged; controls land on providers; no new dependencies.
+
+- [x] 3.1 `pkg/blm`: `Grid.Sum()` accessor + `SparkRPM`/`SparkMAP`/`NewSpark()` (WinALDL spark axes 400–3600/400 × 30–100/5) + unit tests
+- [x] 3.2 `pkg/stream/record.go` (new): `RecordSink` — mutex-guarded switchable tee (`Write` never errors the provider; write error detaches + sticky `Err`; `Set` swaps and returns old target + byte count) + tests incl. failing writer and concurrent Write/Set under `-race`
+- [x] 3.3 `pkg/stream/replay.go`: runtime `SetPaused`/`Paused`/`SetSpeed`/`CurrentSpeed` — re-anchored pacing (non-retroactive speed change), waits sliced ≤100 ms, `Speed==0` inert; existing pacing tests untouched + new pause/speed tests via injectable now/sleep
+- [x] 3.4 `pkg/stream/gridviews.go`: `gridHeat` gains a values param (BLM/INT/O2 pass `Average()`); `SparkBody` (values=`Sum()`, minCount 1, prec 0, KNOCK_CNT status); `LoopStatus`/dots gain SPARK (== O2 condition); tests updated + `TestSparkBody`
+- [x] 3.5 `cmd/goaldl/tui.go` model: 8 tabs (Spark at 5, keys 1–8), `sparkGrid`+knock-delta tracking (baseline first frame, mod-256 wrap, delta>0 bins), `c` on Spark clears grid (baseline kept)
+- [x] 3.6 `cmd/goaldl/tui.go` prompt+save: modal filename prompt (hand-rolled line editor; digits/q type into buffer, enter/esc, empty→cancel); `saveGrids` takes user base + writes 4 files (`writeSparkFile`: Samples + Knock counts, no correction); `O_CREATE|O_EXCL` everywhere — collision keeps the prompt open
+- [x] 3.7 `cmd/goaldl/tui.go` recording: `RecordSink` wired in `cmdTUI` (live only), `r` toggle (prompt on start; stop closes + bytes notice), footer `● REC name bytes`, sink-error auto-stop notice, files closed after program exit
+- [x] 3.8 `cmd/goaldl/tui.go` CSV: `d` toggle reusing `frameCSV` (ParseOK rows only, monitor parity), footer `CSV name rows`, stop/quit closes with row-count notice
+- [x] 3.9 `cmd/goaldl/tui.go` replay keys: `space` pause/resume, `+`/`=`/`-` double/halve clamped 0.25×–16×, no-op notices (live / `-speed 0`), footer `⏸ PAUSED` / `N×` segment
+- [x] 3.10 `cmd/goaldl/tui_test.go`: prompt behavior (digits+`q` type, esc no-file, enter writes edited base, exists→stays open), spark deltas incl. wrap + sum-vs-samples, `r` on replay notice, `d` toggle CSV rows==ParseOK count, save 4 files, 8-tab layout updates, end-to-end drive fixture (spark total == independent recomputation; BLM still 469)
+- [x] V: `gofmt` + `go vet` + `go test -race ./...` green; decoder goldens byte-identical (no `-update`); `monitor`/`blm` paths unchanged

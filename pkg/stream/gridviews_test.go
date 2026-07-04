@@ -28,17 +28,18 @@ func TestLoopStatus(t *testing.T) {
 		badge     string
 		blm, intg string // "BLM ●" etc.
 		o2        string
+		spark     string // ungated like O2: ● whenever a frame parses
 		suffix    string
 	}{
-		{"closed+enabled", ecm.FuelTrim{ClosedLoop: true, BLMEnabled: true}, true, "CLOSED LOOP", "BLM ●", "INT ●", "O2 ●", ""},
-		{"closed+disabled", ecm.FuelTrim{ClosedLoop: true, BLMEnabled: false}, true, "CLOSED LOOP", "BLM ○", "INT ●", "O2 ●", "(BLM disabled)"},
-		{"open", ecm.FuelTrim{ClosedLoop: false}, true, "OPEN LOOP", "BLM ○", "INT ○", "O2 ●", "(grids frozen)"},
-		{"no-good-frame", ecm.FuelTrim{ClosedLoop: true, BLMEnabled: true}, false, "LOOP —", "BLM ○", "INT ○", "O2 ○", ""},
+		{"closed+enabled", ecm.FuelTrim{ClosedLoop: true, BLMEnabled: true}, true, "CLOSED LOOP", "BLM ●", "INT ●", "O2 ●", "SPARK ●", ""},
+		{"closed+disabled", ecm.FuelTrim{ClosedLoop: true, BLMEnabled: false}, true, "CLOSED LOOP", "BLM ○", "INT ●", "O2 ●", "SPARK ●", "(BLM disabled)"},
+		{"open", ecm.FuelTrim{ClosedLoop: false}, true, "OPEN LOOP", "BLM ○", "INT ○", "O2 ●", "SPARK ●", "(grids frozen)"},
+		{"no-good-frame", ecm.FuelTrim{ClosedLoop: true, BLMEnabled: true}, false, "LOOP —", "BLM ○", "INT ○", "O2 ○", "SPARK ○", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got := LoopStatus(c.ft, c.hasGood)
-			for _, want := range []string{c.badge, c.blm, c.intg, c.o2} {
+			for _, want := range []string{c.badge, c.blm, c.intg, c.o2, c.spark} {
 				if !strings.Contains(got, want) {
 					t.Errorf("LoopStatus = %q, missing %q", got, want)
 				}
@@ -100,6 +101,36 @@ func TestO2BodyPrecision(t *testing.T) {
 	}
 	if !strings.Contains(out, "\033[7m") {
 		t.Error("O2Body should highlight the active cell even in open loop (ungated)")
+	}
+}
+
+// TestSparkBody: spark cells show the grid's Sum (total knocks), not the mean
+// delta; the view is ungated (active-cell highlight and no dimming even in
+// open loop) and the status carries the raw counter.
+func TestSparkBody(t *testing.T) {
+	g := blm.NewSpark()
+	g.Add(1600, 40, 2) // two knock events in one cell: deltas 2 + 3
+	g.Add(1600, 40, 3)
+
+	out := SparkBody(g, gridFrame(0x00, 0, 0), 112) // open loop — spark unaffected
+	if !strings.Contains(out, "KNOCK_CNT 112") {
+		t.Errorf("SparkBody status missing raw counter:\n%s", out)
+	}
+	if !strings.Contains(out, "    5") {
+		t.Errorf("SparkBody cell should show the sum 5 (deltas 2+3), not the mean:\n%s", out)
+	}
+	if !strings.Contains(out, "\033[7m") {
+		t.Error("SparkBody should highlight the active cell (ungated, like O2)")
+	}
+	if strings.Contains(out, ansiDim) {
+		t.Error("SparkBody cells should never dim (minCount is 1)")
+	}
+	if !strings.Contains(out, "knocks detected") {
+		t.Errorf("SparkBody missing legend:\n%s", out)
+	}
+	// WinALDL spark axes, not the trim axes: MAP columns start at 30, step 5.
+	if !strings.Contains(out, "  30   35") {
+		t.Errorf("SparkBody header should show the 30/35 MAP columns:\n%s", out)
 	}
 }
 

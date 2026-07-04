@@ -164,6 +164,33 @@ func TestRenderShape(t *testing.T) {
 	}
 }
 
+func TestSum(t *testing.T) {
+	g := NewDefault()
+	g.Add(1600, 40, 2) // two deltas into one cell: sum 5, samples 2
+	g.Add(1600, 40, 3)
+	r, c := idx(g.RPM, 1600), idx(g.MAP, 40)
+	if got := g.Sum()[r][c]; got != 5 {
+		t.Errorf("sum = %v, want 5", got)
+	}
+	if got := g.Samples()[r][c]; got != 2 {
+		t.Errorf("samples = %d, want 2", got)
+	}
+	if got := g.Sum()[idx(g.RPM, 4000)][idx(g.MAP, 90)]; got != 0 {
+		t.Errorf("empty cell sum = %v, want 0", got)
+	}
+}
+
+func TestNewSparkAxes(t *testing.T) {
+	g := NewSpark()
+	// WinALDL spark display grid: RPM 400..3600/400, MAP 30..100/5.
+	if len(g.RPM) != 9 || g.RPM[0] != 400 || g.RPM[8] != 3600 || g.RPM[1]-g.RPM[0] != 400 {
+		t.Errorf("spark RPM axis = %v, want 400..3600 step 400", g.RPM)
+	}
+	if len(g.MAP) != 15 || g.MAP[0] != 30 || g.MAP[14] != 100 || g.MAP[1]-g.MAP[0] != 5 {
+		t.Errorf("spark MAP axis = %v, want 30..100 step 5", g.MAP)
+	}
+}
+
 // idx returns the index of label v in a sorted axis (for readable assertions).
 func idx(labels []float64, v float64) int {
 	for i, l := range labels {

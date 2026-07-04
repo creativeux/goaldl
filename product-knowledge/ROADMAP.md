@@ -34,12 +34,14 @@ Mission: a working, cross-platform scanner/datalogger/tuning aid for GM 160-baud
 - [x] Persistent loop-state line on every tab (Open/Closed + per-grid recording dots)
 - [x] Consumer-side accumulation only — no `Snapshot`/`Session`/`blm`/`ecm` change; decode path untouched
 
-## Phase 3: WinALDL parity — session UX — ⏳ planned
+## Phase 3: WinALDL parity — session UX — ✅ shipped + verified (2026-07-04)
 
-- [ ] In-TUI recording toggle (`r`) — switchable `SerialProvider` sink
-- [ ] Replay pause / speed keys (space, +/-)
-- [ ] Spark-counts grid (knock-delta accumulator)
-- [ ] In-TUI CSV logging toggle (reuse `csv.go`)
+- [x] In-TUI recording toggle (`r`) — `stream.RecordSink` behind the existing `SerialProvider.Sink` seam; fail-soft on write errors (detach + notice, session survives)
+- [x] Replay pause / speed keys (space, +/-/=) — runtime `ReplayProvider` controls, re-anchored non-retroactive pacing, 0.25×–16×
+- [x] Spark-counts grid (knock-delta accumulator, mod-256 wrap) on WinALDL's spark axes (RPM 400–3600/400 × MAP 30–100/5), tab 5 of 8
+- [x] In-TUI CSV logging toggle (`d`, reuses `csv.go`; ParseOK rows — `monitor -csv` parity)
+- [x] Filename prompt on all file actions (`s`/`r`/`d`, default `goaldl_<ts>`, exclusive-create, no silent overwrite) — fulfils the deferred editable-filename request; no-op key warnings self-expire after 3 s
+- [x] `Snapshot`/`Session`/`ecm`/decoder untouched; `pkg/blm` gains only generic `Sum()`/`NewSpark()`; zero new dependencies
 
 ## Phase 4: Beyond parity — ⏳ opportunistic
 

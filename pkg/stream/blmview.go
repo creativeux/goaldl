@@ -78,5 +78,5 @@ func BLMBody(g *blm.Grid, ev FrameEvent, minCount int) string {
 	}
 
 	legend := fmt.Sprintf("  target 128:  >128 lean, <128 rich;  · = no data, dim = <%d samples", minCount)
-	return gridHeat(g, ar, ac, minCount, 0, status, legend)
+	return gridHeat(g, g.Average(), ar, ac, minCount, 0, status, legend)
 }
