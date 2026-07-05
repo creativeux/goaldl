@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"goaldl/pkg/blm"
 	"goaldl/pkg/decoder"
 	"goaldl/pkg/ecm"
@@ -57,47 +59,40 @@ func TestLoopStatus(t *testing.T) {
 	}
 }
 
-// TestINTBodyGating: a closed-loop frame records and highlights the active
-// cell; an open-loop frame shows the frozen status.
+// TestINTBodyGating: a closed-loop frame highlights the active cell; an
+// open-loop frame does not. The grid carries no status line (loop state is in
+// the dashboard's bottom bar).
 func TestINTBodyGating(t *testing.T) {
 	g := blm.NewDefault()
 	g.Add(1600, 40, 130) // one INT sample in the active cell
 
-	closed := INTBody(g, gridFrame(0x82, 130, 0), 4, 130) // MWAF1 bit7+bit1
-	if !strings.Contains(closed, "CLOSED LOOP") || !strings.Contains(closed, "INT 130") {
-		t.Errorf("closed-loop INTBody missing status:\n%s", closed)
-	}
+	closed := INTBody(g, gridFrame(0x82, 130, 0), 4, false, 0) // MWAF1 bit7+bit1
 	if !strings.Contains(closed, "\033[7m") {
 		t.Error("closed-loop INTBody missing active-cell highlight")
 	}
-
-	open := INTBody(g, gridFrame(0x00, 130, 0), 4, 130) // MWAF1=0 → open loop
-	if !strings.Contains(open, "integrator frozen") {
-		t.Errorf("open-loop INTBody missing frozen status:\n%s", open)
+	if strings.Contains(closed, "CLOSED LOOP") {
+		t.Errorf("INTBody should no longer render a status line:\n%s", closed)
 	}
+
+	open := INTBody(g, gridFrame(0x00, 130, 0), 4, false, 0) // MWAF1=0 → open loop
 	if strings.Contains(open, "\033[7m") {
 		t.Error("open-loop INTBody should not highlight an active cell")
 	}
 }
 
-// TestO2BodyPrecision: O2 is ungated; the current-reading status keeps full
-// 3-decimal precision, but grid cells render to 2 decimals so columns don't
-// collide (each cell gets a leading-space gutter).
+// TestO2BodyPrecision: O2 grid cells render to 2 decimals so columns don't
+// collide (each cell gets a leading-space gutter). No status line, so the
+// 3-decimal reading no longer appears at all.
 func TestO2BodyPrecision(t *testing.T) {
 	g := blm.NewDefault()
 	g.Add(1600, 40, 0.834)
 
-	out := O2Body(g, gridFrame(0x00, 0, 188), 0.834) // open loop, but O2 still shows
-	if !strings.Contains(out, "O2 0.834 V") {
-		t.Errorf("O2Body status missing 3-decimal voltage:\n%s", out)
-	}
-	// 3-decimal precision appears only in the status line; the grid cell rounds
-	// to 2 decimals (" 0.83").
-	if n := strings.Count(out, "0.834"); n != 1 {
-		t.Errorf("O2Body has %d occurrences of 0.834, want 1 (status only — cells are 2-decimal):\n%s", n, out)
-	}
+	out := O2Body(g, gridFrame(0x00, 0, 188), false, 0) // open loop, but O2 still shows
 	if !strings.Contains(out, " 0.83") {
 		t.Errorf("O2Body cell should show the 2-decimal average (0.83):\n%s", out)
+	}
+	if strings.Contains(out, "0.834") {
+		t.Errorf("O2Body should not render the 3-decimal reading (no status line):\n%s", out)
 	}
 	if !strings.Contains(out, "\033[7m") {
 		t.Error("O2Body should highlight the active cell even in open loop (ungated)")
@@ -112,10 +107,7 @@ func TestSparkBody(t *testing.T) {
 	g.Add(1600, 40, 2) // two knock events in one cell: deltas 2 + 3
 	g.Add(1600, 40, 3)
 
-	out := SparkBody(g, gridFrame(0x00, 0, 0), 112) // open loop — spark unaffected
-	if !strings.Contains(out, "KNOCK_CNT 112") {
-		t.Errorf("SparkBody status missing raw counter:\n%s", out)
-	}
+	out := SparkBody(g, gridFrame(0x00, 0, 0), false, true, 0) // showInfo → explainer landmark
 	if !strings.Contains(out, "    5") {
 		t.Errorf("SparkBody cell should show the sum 5 (deltas 2+3), not the mean:\n%s", out)
 	}
@@ -141,6 +133,46 @@ func TestSparkBody(t *testing.T) {
 	}
 }
 
+// TestSparkBodyFreeRunning: the free-running warning lives only in the legend/
+// explainer (no duplicate status line above the grid). Collapsed shows the
+// compact warning; expanded swaps to the free-run explainer head; grid values
+// are unchanged; the normal (not free-running) path keeps its usual legend.
+func TestSparkBodyFreeRunning(t *testing.T) {
+	g := blm.NewSpark()
+	g.Add(1600, 40, 2)
+	ev := gridFrame(0x00, 0, 0)
+
+	// Collapsed + free-running: the compact legend carries the one warning.
+	compact := SparkBody(g, ev, true, false, 0)
+	if !strings.Contains(compact, "counter free-running — cell values are not knock") {
+		t.Errorf("collapsed free-running SparkBody should warn in the legend:\n%s", compact)
+	}
+	// The warning appears exactly once (not duplicated above the grid).
+	if n := strings.Count(compact, "free-running"); n != 1 {
+		t.Errorf("free-running warning should appear once, got %d:\n%s", n, compact)
+	}
+
+	// Expanded + free-running: the explainer head swaps; grid values unchanged.
+	warned := SparkBody(g, ev, true, true, 0)
+	if !strings.Contains(warned, "KNOCK_CNT is free-running") {
+		t.Errorf("expanded free-running SparkBody should swap the explainer head:\n%s", warned)
+	}
+	if strings.Contains(warned, "The goal is 0") {
+		t.Errorf("free-running explainer must not keep the 'goal is 0' line:\n%s", warned)
+	}
+	if !strings.Contains(warned, "    2") {
+		t.Errorf("free-running SparkBody must still show the grid values:\n%s", warned)
+	}
+
+	normal := SparkBody(g, ev, false, true, 0)
+	if strings.Contains(normal, "free-running") {
+		t.Errorf("normal SparkBody must not warn:\n%s", normal)
+	}
+	if !strings.Contains(normal, "The goal is 0") {
+		t.Errorf("normal SparkBody keeps its usual explainer:\n%s", normal)
+	}
+}
+
 // TestGridExplainers: each grid view carries its always-visible "what this
 // table means" block; the streaming BLMBody (monitor -blm) keeps the compact
 // one-line legend instead.
@@ -148,22 +180,117 @@ func TestGridExplainers(t *testing.T) {
 	g := blm.NewDefault()
 	ev := gridFrame(0x82, 130, 188)
 
-	if out := BLMBodyExplained(g, ev, 4); !strings.Contains(out, "Block Learn Multiplier") || !strings.Contains(out, "avg/128") {
+	if out := BLMBodyDash(g, ev, 4, 0, true); !strings.Contains(out, "Block Learn Multiplier") || !strings.Contains(out, "avg/128") {
 		t.Errorf("BLMBodyExplained missing the meaning/act lines:\n%s", out)
 	}
-	if out := BLMBody(g, ev, 4); strings.Contains(out, "Block Learn Multiplier") || !strings.Contains(out, "target 128") {
+	if out := BLMBody(g, ev, 4, 0); strings.Contains(out, "Block Learn Multiplier") || !strings.Contains(out, "target 128") {
 		t.Errorf("BLMBody (monitor) should keep the compact legend, not the explainer:\n%s", out)
 	}
-	if out := INTBody(g, ev, 4, 130); !strings.Contains(out, "Integrator") || !strings.Contains(out, "learned into BLM") {
-		t.Errorf("INTBody missing its explainer:\n%s", out)
+	if out := INTBody(g, ev, 4, true, 0); !strings.Contains(out, "Integrator") || !strings.Contains(out, "learned into BLM") {
+		t.Errorf("INTBody (showInfo) missing its explainer:\n%s", out)
 	}
-	if out := O2Body(g, ev, 0.834); !strings.Contains(out, "stoichiometric") || !strings.Contains(out, "0.45") {
-		t.Errorf("O2Body missing its explainer:\n%s", out)
+	if out := O2Body(g, ev, true, 0); !strings.Contains(out, "stoichiometric") || !strings.Contains(out, "0.45") {
+		t.Errorf("O2Body (showInfo) missing its explainer:\n%s", out)
 	}
 }
 
-// TestSensorTableExtrema: the 6-column table shows MIN/MAX; nil extrema falls
-// back to the 4-column table.
+// TestGridLegendAccordion: with showInfo false (the dashboard default) the grid
+// tabs render the compact one-line legend, not the multi-line explainer.
+func TestGridLegendAccordion(t *testing.T) {
+	g := blm.NewDefault()
+	ev := gridFrame(0x82, 130, 188)
+
+	if out := INTBody(g, ev, 4, false, 0); strings.Contains(out, "learned into BLM") || !strings.Contains(out, "read sustained cell averages") {
+		t.Errorf("collapsed INTBody should show the compact legend, not the explainer:\n%s", out)
+	}
+	if out := O2Body(g, ev, false, 0); strings.Contains(out, "stoichiometric") || !strings.Contains(out, "oscillates in closed loop") {
+		t.Errorf("collapsed O2Body should show the compact legend, not the explainer:\n%s", out)
+	}
+	if out := SparkBody(g, ev, false, false, 0); strings.Contains(out, "false knock") || !strings.Contains(out, "goal is 0 everywhere") {
+		t.Errorf("collapsed SparkBody should show the compact legend, not the explainer:\n%s", out)
+	}
+	// A collapsed, free-running Spark tab still carries the warning (in both the
+	// status line and the compact legend), even without the full explainer.
+	if out := SparkBody(g, ev, true, false, 0); !strings.Contains(out, "free-running") || strings.Contains(out, "working ESC") {
+		t.Errorf("collapsed free-running SparkBody should warn without the explainer:\n%s", out)
+	}
+}
+
+// TestGridWidthTruncation: a narrow width caps the MAP columns at a whole-column
+// boundary with a › cue (never a partial number); width 0 keeps every column.
+func TestGridWidthTruncation(t *testing.T) {
+	g := blm.NewSpark() // 15 MAP columns → 84 cols wide
+	g.Add(1600, 40, 5)
+
+	full := SparkBody(g, gridFrame(0x00, 0, 0), false, false, 0)
+	if !strings.Contains(full, "  95  100") || strings.Contains(full, "›") {
+		t.Errorf("width 0 should render every MAP column, no cue:\n%s", full)
+	}
+
+	narrow := SparkBody(g, gridFrame(0x00, 0, 0), false, false, 50)
+	if !strings.Contains(narrow, "›") {
+		t.Errorf("a narrow grid should show the › truncation cue:\n%s", narrow)
+	}
+	if strings.Contains(narrow, "  95  100") {
+		t.Errorf("a narrow grid should drop the rightmost MAP columns:\n%s", narrow)
+	}
+	// Every grid row/header fits the width in DISPLAY cells (label ~9 + N×5 +
+	// " ›" ≤ width; ANSI highlight escapes don't count toward the width).
+	for _, ln := range strings.Split(narrow, "\n") {
+		if strings.HasPrefix(ln, "  RPM") || strings.HasPrefix(ln, "   ") {
+			if w := ansi.StringWidth(ln); w > 50 {
+				t.Errorf("grid line exceeds width 50 (%d): %q", w, ln)
+			}
+		}
+	}
+
+	// Sub-usably-narrow (no room for even one 5-wide column): gridHeat emits the
+	// RPM label + › only, never a partial data digit. Because gridHeat keeps its
+	// own lines ≤ width, the caller's ANSI catch-all never has to cut a cell.
+	tiny := SparkBody(g, gridFrame(0x00, 0, 0), false, false, 13)
+	for _, ln := range strings.Split(tiny, "\n") {
+		if strings.HasPrefix(ln, "  RPM") || strings.HasPrefix(ln, "   ") {
+			if w := ansi.StringWidth(ln); w > 13 {
+				t.Errorf("sub-narrow grid line exceeds width 13 (%d): %q", w, ln)
+			}
+		}
+	}
+}
+
+// TestSensorTableColumnDrop: under width pressure the table drops ALT first, then
+// RAW, keeping SENSOR/VALUE/MIN/MAX; width 0 keeps all six columns.
+func TestSensorTableColumnDrop(t *testing.T) {
+	frame := []byte{0x04, 0x18, 0x93, 0x75, 0x53, 0x00, 0x5B, 0x43, 0x36, 0x80, 0x69, 0x00, 0x00, 0x00, 0x00, 0x87, 0x80, 0x70, 0x7D, 0xC8}
+	def, _ := ecm.NewRegistry().GetDefinition("1227747")
+	ev := FrameEvent{Frame: decoder.Frame{Data: frame}}
+	mins := map[string]float64{"engine_rpm": 550}
+	maxs := map[string]float64{"engine_rpm": 3700}
+
+	if full := SensorTableExtrema(ev, def, mins, maxs, 0); !strings.Contains(full, "ALT") || !strings.Contains(full, "RAW") {
+		t.Errorf("width 0 keeps all columns:\n%s", full)
+	}
+
+	// Narrow enough to force ALT out but keep RAW.
+	mid := SensorTableExtrema(ev, def, mins, maxs, 66)
+	if strings.Contains(mid, "ALT") {
+		t.Errorf("ALT should drop first under width pressure:\n%s", mid)
+	}
+	if !strings.Contains(mid, "SENSOR") || !strings.Contains(mid, "VALUE") || !strings.Contains(mid, "RAW") {
+		t.Errorf("SENSOR/VALUE/RAW must survive the first drop:\n%s", mid)
+	}
+
+	// Very narrow: RAW drops too.
+	tight := SensorTableExtrema(ev, def, mins, maxs, 52)
+	if strings.Contains(tight, "RAW") {
+		t.Errorf("RAW should drop second under tighter width:\n%s", tight)
+	}
+	if !strings.Contains(tight, "SENSOR") || !strings.Contains(tight, "VALUE") {
+		t.Errorf("SENSOR/VALUE must always survive:\n%s", tight)
+	}
+}
+
+// TestSensorTableExtrema: the dashboard table shows SENSOR/RAW/VALUE/ALT (MIN
+// and MAX are hidden for now); nil extrema falls back to the plain SensorTable.
 func TestSensorTableExtrema(t *testing.T) {
 	frame := []byte{0x04, 0x18, 0x93, 0x75, 0x53, 0x00, 0x5B, 0x43, 0x36, 0x80, 0x69, 0x00, 0x00, 0x00, 0x00, 0x87, 0x80, 0x70, 0x7D, 0xC8}
 	registry := ecm.NewRegistry()
@@ -172,18 +299,18 @@ func TestSensorTableExtrema(t *testing.T) {
 
 	mins := map[string]float64{"engine_rpm": 550, "battery_voltage": 12.1}
 	maxs := map[string]float64{"engine_rpm": 3700, "battery_voltage": 14.6}
-	out := SensorTableExtrema(ev, def, mins, maxs)
-	for _, want := range []string{"MIN", "MAX", "550", "3700", "12.10", "14.60"} {
+	out := SensorTableExtrema(ev, def, mins, maxs, 0)
+	for _, want := range []string{"SENSOR", "RAW", "VALUE", "ALT"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("SensorTableExtrema missing %q:\n%s", want, out)
 		}
 	}
-
-	// nil extrema → 4-column fallback (no MIN/MAX headers).
-	fallback := SensorTableExtrema(ev, def, nil, nil)
-	if strings.Contains(fallback, "MIN") || strings.Contains(fallback, "MAX") {
-		t.Errorf("nil extrema should render the 4-column table:\n%s", fallback)
+	if strings.Contains(out, "MIN") || strings.Contains(out, "MAX") {
+		t.Errorf("MIN/MAX columns should be hidden for now:\n%s", out)
 	}
+
+	// nil extrema → the plain SensorTable fallback (unchanged monitor path).
+	fallback := SensorTableExtrema(ev, def, nil, nil, 0)
 	if fallback != SensorTable(ev, def) {
 		t.Error("nil extrema should equal SensorTable output")
 	}

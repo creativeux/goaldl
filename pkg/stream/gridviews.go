@@ -20,21 +20,50 @@ import (
 // reverse-highlighted, cells below minCount dimmed as still-accumulating, "·"
 // for empty), and a legend. values is the per-cell number to show — Average()
 // for the trim/O2 grids, Sum() for spark knock counts. prec is the decimal
-// precision per cell (0 for BLM/INT counts, 2 for O2 volts). It reads the
-// grid but never modifies it.
-func gridHeat(g *blm.Grid, values [][]float64, ar, ac, minCount, prec int, status, legend string) string {
+// precision per cell (0 for BLM/INT counts, 2 for O2 volts). width caps the
+// number of MAP columns drawn so a wide grid (the Spark axes are 15 columns)
+// truncates at a whole-column boundary with a › cue rather than wrapping or
+// cutting a number mid-digit (width<=0 = no limit). It reads the grid but never
+// modifies it.
+func gridHeat(g *blm.Grid, values [][]float64, ar, ac, minCount, prec int, status, legend string, width int) string {
 	samples := g.Samples()
 
+	// "  RPM\MAP" label is 9 cells; each MAP column is 5; reserve 2 for " ›".
+	// gridHeat self-limits so its lines never exceed width — the caller's
+	// ANSI catch-all must never have to cut a cell (that would show a partial,
+	// misleading number). When not even one column fits, emit the label + › only.
+	const labelW, cellW = 9, 5
+	cols := len(g.MAP)
+	truncated := false
+	if width > 0 {
+		switch fit := (width - labelW - 2) / cellW; {
+		case fit < 1:
+			cols, truncated = 0, true
+		case fit < cols:
+			cols, truncated = fit, true
+		}
+	}
+
 	var b strings.Builder
-	fmt.Fprintln(&b, status)
+	// The status line is optional: the dashboard suppresses it (the bottom bar
+	// already shows loop state), leaving the grid to breathe; the streaming
+	// monitor passes a live status. Empty ⇒ no line at all (not a blank).
+	if status != "" {
+		fmt.Fprintln(&b, status)
+	}
 	b.WriteString("  RPM\\MAP")
-	for _, m := range g.MAP {
-		fmt.Fprintf(&b, " %4.0f", m)
+	for c := 0; c < cols; c++ {
+		fmt.Fprintf(&b, " %4.0f", g.MAP[c])
+	}
+	if truncated {
+		b.WriteString(" ›")
 	}
 	b.WriteByte('\n')
 	for r, rpm := range g.RPM {
-		fmt.Fprintf(&b, "  %5.0f ", rpm)
-		for c := range g.MAP {
+		// 9-col row label to match the "  RPM\MAP" header width (labelW), so the
+		// MAP column values line up under their headers.
+		fmt.Fprintf(&b, "  %5.0f  ", rpm)
+		for c := 0; c < cols; c++ {
 			var cellText string
 			switch {
 			case samples[r][c] == 0:
@@ -49,8 +78,12 @@ func gridHeat(g *blm.Grid, values [][]float64, ar, ac, minCount, prec int, statu
 			}
 			b.WriteString(cellText)
 		}
+		if truncated {
+			b.WriteString(" ›")
+		}
 		b.WriteByte('\n')
 	}
+	b.WriteByte('\n') // blank line below the grid, before the legend, to breathe
 	b.WriteString(legend)
 	return b.String()
 }
@@ -93,29 +126,59 @@ const (
   masking. Ungated — records every frame, so open-loop cells (WOT / cold)
   show the true uncorrected mixture.` + ansiReset
 
-	sparkExplainer = ansiDim + `  SPARK — knock events: how many times the ESC counted detonation in each
+	// The spark explainer has two heads sharing one tail: the normal one, and a
+	// free-running-counter warning shown when the ECM's KNOCK_CNT advances every
+	// frame (as on the target vehicle — verified in drive_4800.raw and the
+	// WinALDL log). Per the raw-data policy the grid values are still shown at
+	// full brightness; only this text and the status line flag that they are a
+	// counter artifact, not knock.
+	sparkExplainerNormal = ansiDim + `  SPARK — knock events: how many times the ESC counted detonation in each
   cell this session (deltas of the cumulative knock counter). The goal is 0
   everywhere. A repeating count in a cell = too much spark advance or too
-  lean under that load — pull timing or add fuel there and re-test. A lone
-  count on startup or rough road can be false knock; look for repetition.` + ansiReset
+  lean under that load — pull timing or add fuel there and re-test.` + sparkExplainerTail
+
+	sparkExplainerFreeRun = ansiDim + `  SPARK — knock events per cell (deltas of the cumulative knock counter).
+  ⚠ On THIS vehicle KNOCK_CNT is free-running — it advances every frame, so
+  the cell totals below are a counter artifact, NOT a knock count, and are
+  not meaningful. On an ECM with a working ESC, a cell total > 0 means
+  detonation was counted there.` + sparkExplainerTail
+
+	sparkExplainerTail = `
+  A lone count on startup or rough road can be false knock; look for
+  repetition before acting.` + ansiReset
+)
+
+// Compact one-line legends shown in place of the full explainer when the info
+// accordion is collapsed (the dashboard default — `i` toggles it). They keep a
+// grid tab readable without the 5–6 line explainer eating vertical space on a
+// short terminal. BLM's compact legend lives in BLMBody (shared with the
+// streaming `monitor -blm`, which has no `i` key).
+const (
+	intLegend          = `  target 128 · >128 lean · <128 rich · read sustained cell averages`
+	o2Legend           = `  ~0.45 V stoich · <0.3 lean · >0.7 rich · oscillates in closed loop`
+	sparkLegend        = `  knock events per cell · goal is 0 everywhere`
+	sparkLegendFreeRun = `  ` + ansiBold + `⚠ counter free-running — cell values are not knock` + ansiReset
 )
 
 // INTBody renders the integrator (short-term fuel trim) grid. Like BLM it bins
 // by RPM×MAP and shows the Wide Average, but it gates on closed loop only
 // (block-learn-enable is a BLM-specific gate). intVal is the current frame's
 // integrator, shown live in the status line.
-func INTBody(g *blm.Grid, ev FrameEvent, minCount int, intVal float64) string {
+// showInfo selects the full explainer (true) or the compact one-line legend
+// (false, the dashboard default) — the info accordion toggled by `i`. The grid
+// has no status line (the bottom bar carries loop state); the active cell is
+// still highlighted in closed loop.
+func INTBody(g *blm.Grid, ev FrameEvent, minCount int, showInfo bool, width int) string {
 	ft := ecm.FuelTrimSample(ev.Frame.Data)
 	ar, ac := -1, -1
-	status := "OPEN LOOP — integrator frozen"
 	if ft.ClosedLoop {
 		ar, ac = g.Cell(ft.RPM, ft.MapKPa)
-		prog := fmt.Sprintf("  cell %.0f/%d",
-			math.Min(float64(g.Samples()[ar][ac]), float64(minCount)), minCount)
-		status = fmt.Sprintf("CLOSED LOOP  RPM %.0f  MAP %.0f kPa  INT %.0f%s",
-			ft.RPM, ft.MapKPa, intVal, prog)
 	}
-	return gridHeat(g, g.Average(), ar, ac, minCount, 0, status, intExplainer)
+	legend := intLegend
+	if showInfo {
+		legend = intExplainer
+	}
+	return gridHeat(g, g.Average(), ar, ac, minCount, 0, "", legend, width)
 }
 
 // O2Body renders the oxygen-sensor voltage grid. O2 is ungated (populates every
@@ -124,11 +187,14 @@ func INTBody(g *blm.Grid, ev FrameEvent, minCount int, intVal float64) string {
 // leading-space gutter between columns (a 3-decimal cell fills the whole 5-wide
 // column and columns collide); the current reading and the saved file keep full
 // 3-decimal precision. o2Volts is the current frame's O2 voltage.
-func O2Body(g *blm.Grid, ev FrameEvent, o2Volts float64) string {
+func O2Body(g *blm.Grid, ev FrameEvent, showInfo bool, width int) string {
 	ft := ecm.FuelTrimSample(ev.Frame.Data)
 	ar, ac := g.Cell(ft.RPM, ft.MapKPa)
-	status := fmt.Sprintf("O2 %.3f V  RPM %.0f  MAP %.0f kPa", o2Volts, ft.RPM, ft.MapKPa)
-	return gridHeat(g, g.Average(), ar, ac, 1, 2, status, o2Explainer)
+	legend := o2Legend
+	if showInfo {
+		legend = o2Explainer
+	}
+	return gridHeat(g, g.Average(), ar, ac, 1, 2, "", legend, width)
 }
 
 // SparkBody renders the knock-events grid: each cell is the total knocks
@@ -139,11 +205,29 @@ func O2Body(g *blm.Grid, ev FrameEvent, o2Volts float64) string {
 // frame's raw counter, shown in the status line. (A mid-session counter reset
 // — ECM power cycle — appears as one spurious wrapped delta; accepted, same
 // failure mode as WinALDL.)
-func SparkBody(g *blm.Grid, ev FrameEvent, knockCnt float64) string {
+// freeRunning is the consumer's verdict that KNOCK_CNT is advancing every frame
+// (a counter artifact, not knock). When set, the status line gains a warning and
+// the legend/explainer notes it; the grid values are unchanged (shown at full
+// brightness — raw-data policy: annotate, never hide or dim). showInfo picks the
+// full explainer (true) over the compact legend (false, the dashboard default).
+func SparkBody(g *blm.Grid, ev FrameEvent, freeRunning, showInfo bool, width int) string {
 	ft := ecm.FuelTrimSample(ev.Frame.Data)
 	ar, ac := g.Cell(ft.RPM, ft.MapKPa)
-	status := fmt.Sprintf("KNOCK_CNT %.0f  RPM %.0f  MAP %.0f kPa", knockCnt, ft.RPM, ft.MapKPa)
-	return gridHeat(g, g.Sum(), ar, ac, 1, 0, status, sparkExplainer)
+	var legend string
+	switch {
+	case freeRunning && showInfo:
+		legend = sparkExplainerFreeRun
+	case freeRunning:
+		legend = sparkLegendFreeRun
+	case showInfo:
+		legend = sparkExplainerNormal
+	default:
+		legend = sparkLegend
+	}
+	// No status line: like the other grids, loop state is in the bottom bar. The
+	// free-running warning lives only in the legend/explainer (always visible,
+	// bold) rather than being duplicated above the grid.
+	return gridHeat(g, g.Sum(), ar, ac, 1, 0, "", legend, width)
 }
 
 // LoopBadge is the loop-state word: CLOSED LOOP / OPEN LOOP, or "LOOP —" before

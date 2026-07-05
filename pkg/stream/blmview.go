@@ -43,7 +43,8 @@ func (v *BLMView) Render(ev FrameEvent) {
 	}
 	titleLine := fmt.Sprintf("%s   frame %d   t=%.1fs   %d cells ready",
 		v.title, ev.Index, ev.Elapsed.Seconds(), v.Grid.PopulatedCells(v.minCount))
-	body := titleLine + "\n" + BLMBody(v.Grid, ev, v.minCount)
+	// width 0: the streaming view is a fixed in-place redraw, not width-clamped.
+	body := titleLine + "\n" + BLMBody(v.Grid, ev, v.minCount, 0)
 	if v.lastLines > 0 {
 		fmt.Fprintf(v.w, "\033[%dA", v.lastLines)
 	}
@@ -53,41 +54,52 @@ func (v *BLMView) Render(ev FrameEvent) {
 	v.lastLines = strings.Count(body, "\n") + 1
 }
 
+// blmCompactLegend is the one-line BLM legend (target/lean/rich + dim key).
+func blmCompactLegend(minCount int) string {
+	return fmt.Sprintf("  target 128:  >128 lean, <128 rich;  · = no data, dim = <%d samples", minCount)
+}
+
 // BLMBody renders the BLM status line, the Wide-Average grid (active cell
 // reverse-highlighted, cells below minCount dimmed as still-accumulating), and
 // the compact one-line legend — the streaming `monitor -blm` variant, which
-// redraws in place and keeps its chrome tight. It reads the grid but does not
-// modify it.
-func BLMBody(g *blm.Grid, ev FrameEvent, minCount int) string {
-	legend := fmt.Sprintf("  target 128:  >128 lean, <128 rich;  · = no data, dim = <%d samples", minCount)
-	return blmBody(g, ev, minCount, legend)
+// redraws in place and keeps its chrome tight (it has no bottom bar, so it keeps
+// the live status line). width caps the MAP columns (0 = no limit; monitor 0).
+func BLMBody(g *blm.Grid, ev FrameEvent, minCount, width int) string {
+	return blmBody(g, ev, minCount, blmCompactLegend(minCount), width, true)
 }
 
-// BLMBodyExplained is BLMBody with the full "what this table means" block in
-// place of the compact legend — the dashboard variant, where the explainer is
-// always visible under the grid.
-func BLMBodyExplained(g *blm.Grid, ev FrameEvent, minCount int) string {
-	return blmBody(g, ev, minCount, blmExplainer)
+// BLMBodyDash is the dashboard BLM tab: no status line (the bottom bar shows
+// loop state), and the compact legend or the full explainer per showInfo.
+func BLMBodyDash(g *blm.Grid, ev FrameEvent, minCount, width int, showInfo bool) string {
+	legend := blmCompactLegend(minCount)
+	if showInfo {
+		legend = blmExplainer
+	}
+	return blmBody(g, ev, minCount, legend, width, false)
 }
 
-func blmBody(g *blm.Grid, ev FrameEvent, minCount int, legend string) string {
+// showStatus renders the live CLOSED/OPEN-LOOP reading above the grid (the
+// streaming monitor); the dashboard passes false so the grid gets that row back.
+func blmBody(g *blm.Grid, ev FrameEvent, minCount int, legend string, width int, showStatus bool) string {
 	ft := ecm.FuelTrimSample(ev.Frame.Data)
 	ar, ac := -1, -1
 	if ft.Recordable() {
 		ar, ac = g.Cell(ft.RPM, ft.MapKPa)
 	}
-	var status string
-	switch {
-	case ft.ClosedLoop && ft.BLMEnabled:
-		prog := ""
-		if ar >= 0 {
-			prog = fmt.Sprintf("  cell %.0f/%d", math.Min(float64(g.Samples()[ar][ac]), float64(minCount)), minCount)
+	status := ""
+	if showStatus {
+		switch {
+		case ft.ClosedLoop && ft.BLMEnabled:
+			prog := ""
+			if ar >= 0 {
+				prog = fmt.Sprintf("  cell %.0f/%d", math.Min(float64(g.Samples()[ar][ac]), float64(minCount)), minCount)
+			}
+			status = fmt.Sprintf("CLOSED LOOP  RPM %.0f  MAP %.0f kPa  BLM %.0f%s", ft.RPM, ft.MapKPa, ft.BLM, prog)
+		case !ft.ClosedLoop:
+			status = "OPEN LOOP — not recording (WOT / decel / cold)"
+		default:
+			status = "block learn disabled — not recording"
 		}
-		status = fmt.Sprintf("CLOSED LOOP  RPM %.0f  MAP %.0f kPa  BLM %.0f%s", ft.RPM, ft.MapKPa, ft.BLM, prog)
-	case !ft.ClosedLoop:
-		status = "OPEN LOOP — not recording (WOT / decel / cold)"
-	default:
-		status = "block learn disabled — not recording"
 	}
-	return gridHeat(g, g.Average(), ar, ac, minCount, 0, status, legend)
+	return gridHeat(g, g.Average(), ar, ac, minCount, 0, status, legend, width)
 }

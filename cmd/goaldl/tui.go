@@ -15,6 +15,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"goaldl/pkg/blm"
 	"goaldl/pkg/decoder"
@@ -144,13 +145,18 @@ func cmdTUI(args []string) {
 	// still blocks once it fills, back-pressuring the provider — the buffer only
 	// buys ~8 frames of slack, it doesn't guarantee the UART keeps draining.
 	snaps := make(chan stream.Snapshot, 8)
+	// errCh carries the session's terminal error (a failed port open/read) to
+	// the model. Buffered(1) and always sent before snaps closes, so the reader
+	// in waitForSnapshot never blocks and never misses it.
+	errCh := make(chan error, 1)
 	go func() {
-		session.Run(ctx, func(s stream.Snapshot) {
+		runErr := session.Run(ctx, func(s stream.Snapshot) {
 			select {
 			case snaps <- s:
 			case <-ctx.Done():
 			}
 		})
+		errCh <- runErr
 		close(snaps)
 	}()
 
@@ -159,6 +165,7 @@ func cmdTUI(args []string) {
 		minSamples: cfg.minSamples,
 		source:     session.Name(),
 		snaps:      snaps,
+		errCh:      errCh,
 		cancel:     cancel,
 		replay:     replay,
 		recSink:    recSink,
@@ -173,6 +180,12 @@ func cmdTUI(args []string) {
 	cancel()
 	if fm, ok := final.(tuiModel); ok {
 		fm.closeOutputs()
+		if fm.fatalErr != nil {
+			// Reprint after the alt-screen tears down, so the diagnosis survives
+			// the exit and is visible to a script that redirected stderr.
+			fmt.Fprintf(os.Stderr, "goaldl: %v\n", fm.fatalErr)
+			os.Exit(1)
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
@@ -229,18 +242,37 @@ type promptState struct {
 const rawHistoryCap = 64
 
 // snapshotMsg carries one processed frame into the update loop; providerDoneMsg
-// signals the stream ended (replay finished or port closed); noticeExpireMsg
-// clears a self-expiring warning notice (the payload is the notice sequence
-// number it was armed for, so a stale timer never clears a newer notice).
+// signals the stream ended (replay finished or port closed) and carries the
+// session's terminal error (nil on a clean end, context.Canceled on quit);
+// noticeExpireMsg clears a self-expiring warning notice (the payload is the
+// notice sequence number it was armed for, so a stale timer never clears a
+// newer notice); tickMsg is the 1s heartbeat that drives staleness detection.
 type (
 	snapshotMsg     stream.Snapshot
-	providerDoneMsg struct{}
+	providerDoneMsg struct{ err error }
 	noticeExpireMsg int
+	tickMsg         time.Time
 )
 
 // noticeTTL is how long a no-op key warning (e.g. `r` during replay) stays in
 // the footer before clearing itself.
 const noticeTTL = 3 * time.Second
+
+// staleAfter is how long a live stream may go without a new frame before the
+// dashboard flags its data stale (~5 frames at the ~1.2s ALDL cadence).
+const staleAfter = 6 * time.Second
+
+// Free-running-knock detection window: judge over the last knockWindowSize
+// parsed frames, but only once knockWindowMin have been seen; declare the
+// counter free-running when at least knockFreeFrac of them carried a nonzero
+// KNOCK_CNT delta. On the target vehicle the counter advances every frame
+// (~100% nonzero); genuine ESC knock is nonzero on only a few frames a session,
+// so the two regimes separate cleanly well away from the threshold.
+const (
+	knockWindowSize = 40
+	knockWindowMin  = 20
+	knockFreeFrac   = 0.5
+)
 
 type tuiModel struct {
 	// config / wiring
@@ -248,6 +280,7 @@ type tuiModel struct {
 	minSamples int
 	source     string
 	snaps      <-chan stream.Snapshot
+	errCh      <-chan error // session's terminal error, read when snaps closes
 	cancel     context.CancelFunc
 	replay     *stream.ReplayProvider // pause/speed handle (nil when live)
 	recSink    *stream.RecordSink     // raw-capture tee (nil when replay)
@@ -279,6 +312,27 @@ type tuiModel struct {
 	csvName       string
 	frameCount    int
 	done          bool
+	fatalErr      error // session's terminal error (nil = clean end / user quit)
+
+	// staleness (live only): lastFrameAt is when the newest snapshot arrived;
+	// now is advanced by the 1s tick. A live stream that has gone quiet for
+	// staleAfter is flagged stale (hollow heartbeat + footer age).
+	lastFrameAt time.Time
+	now         time.Time
+
+	// free-running-knock detection: a sliding window over parsed frames records
+	// whether each had a nonzero KNOCK_CNT delta. A high fraction means the
+	// counter is free-running (a counter artifact, not knock) — see A.3.
+	knockWindow      [knockWindowSize]bool
+	knockWindowHead  int // next write position (ring)
+	knockWindowCount int // frames seen, capped at knockWindowSize
+	knockNonzero     int // count of true entries currently in the window
+
+	// layout: showInfo expands the grid explainer accordion (`i`); scroll is the
+	// vertical offset into a body taller than the terminal (`j`/`k`/↑/↓), so a
+	// short terminal never scrolls the tab bar off the top.
+	showInfo bool
+	scroll   int
 }
 
 // waitForSnapshot blocks on the snapshot channel and delivers the next as a
@@ -287,18 +341,36 @@ func (m tuiModel) waitForSnapshot() tea.Cmd {
 	return func() tea.Msg {
 		s, ok := <-m.snaps
 		if !ok {
-			return providerDoneMsg{}
+			return providerDoneMsg{err: <-m.errCh}
 		}
 		return snapshotMsg(s)
 	}
 }
 
-func (m tuiModel) Init() tea.Cmd { return m.waitForSnapshot() }
+func (m tuiModel) Init() tea.Cmd { return tea.Batch(m.waitForSnapshot(), m.tick()) }
+
+// stale reports whether a live stream has gone quiet (no new frame for
+// staleAfter) and for how long. It is false for a replay (paced playback and
+// pause are expected quiet), before the first frame, and after the stream ends
+// — those states have their own chrome. Pure over model fields, so the tests
+// need no wall clock.
+func (m tuiModel) stale() (bool, time.Duration) {
+	if m.replay != nil || !m.hasFrame || m.done {
+		return false, 0
+	}
+	age := m.now.Sub(m.lastFrameAt)
+	return age >= staleAfter, age
+}
 
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.scroll = m.clampScroll(m.scroll) // the new height changes maxScroll
+		// Clear on resize: we always emit a full terminal-height frame, but the
+		// terminal may leave stale rows from the old size — wipe them so a shrunk
+		// frame can't leave a frozen copy of the old footer behind.
+		return m, tea.ClearScreen
 
 	case tea.KeyMsg:
 		// An open filename prompt captures every key (digits, q, … type into
@@ -309,6 +381,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd := m.handlePromptKey(msg)
 			return m, cmd
 		}
+		prevActive := m.active
 		switch msg.String() {
 		case "ctrl+c", "q":
 			m.cancel()
@@ -333,6 +406,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.active = (m.active + 1) % viewCount
 		case "shift+tab", "left", "h":
 			m.active = (m.active + viewCount - 1) % viewCount
+		case "i":
+			// Toggle the grid explainer accordion; height changes, so re-home the
+			// scroll. A no-op on non-grid tabs (they render no explainer).
+			m.showInfo = !m.showInfo
+			m.scroll = 0
+		case "j", "down":
+			m.scroll = m.clampScroll(m.scroll + 1)
+		case "k", "up":
+			m.scroll = m.clampScroll(m.scroll - 1)
 		case "s":
 			m.prompt = &promptState{target: promptSave, buf: defaultBase()}
 		case "c":
@@ -354,12 +436,17 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd := m.adjustSpeed(0.5)
 			return m, cmd
 		}
+		if m.active != prevActive {
+			m.scroll = 0 // a fresh tab starts at the top
+		}
 
 	case snapshotMsg:
 		s := stream.Snapshot(msg)
 		m.latest = s
 		m.hasFrame = true
 		m.frameCount++
+		m.lastFrameAt = time.Now()
+		m.now = m.lastFrameAt
 		// The raw history takes every frame — the raw view is never gated
 		// (WinALDL behavior: a bad sample still updates the RAW tab). The
 		// decoded views render from lastGood instead.
@@ -395,6 +482,18 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case providerDoneMsg:
 		m.done = true
+		// A clean end (nil) or the user's own quit (context.Canceled) is not an
+		// error; anything else is a transport failure worth showing.
+		if msg.err != nil && !errors.Is(msg.err, context.Canceled) {
+			m.fatalErr = msg.err
+		}
+
+	case tickMsg:
+		m.now = time.Time(msg)
+		if m.done {
+			return m, nil // stream ended — stop the idle staleness timer
+		}
+		return m, m.tick()
 
 	case noticeExpireMsg:
 		if int(msg) == m.noticeSeq {
@@ -402,6 +501,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// tick schedules the next 1s staleness heartbeat.
+func (m tuiModel) tick() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
 // setNotice replaces the footer notice, bumping the sequence number so any
@@ -441,7 +545,9 @@ func (m *tuiModel) accumulate(s stream.Snapshot) {
 	// counts knocks during the session, not the counter's absolute value.
 	knock := s.Sensors["knock_count"]
 	if m.hasKnockBase {
-		if delta := math.Mod(knock-m.knockPrev+256, 256); delta > 0 {
+		delta := math.Mod(knock-m.knockPrev+256, 256)
+		m.pushKnock(delta > 0) // feed the free-running-counter detector
+		if delta > 0 {
 			m.sparkGrid.Add(ft.RPM, ft.MapKPa, delta)
 		}
 	}
@@ -735,6 +841,9 @@ var (
 )
 
 func (m tuiModel) View() string {
+	if m.fatalErr != nil {
+		return m.padHeight(m.fitWidth(m.errorPanel()))
+	}
 	tabs := []string{"1 Sensors", "2 BLM", "3 INT", "4 O2", "5 Spark", "6 Flags", "7 Codes", "8 Raw"}
 	rendered := make([]string, len(tabs))
 	for i, t := range tabs {
@@ -746,48 +855,194 @@ func (m tuiModel) View() string {
 	}
 	header := lipgloss.JoinHorizontal(lipgloss.Top, rendered...) + "   " + dimStyle.Render(m.source)
 
-	var body string
-	switch {
-	case !m.hasFrame:
-		body = dimStyle.Render("\n  waiting for frames…")
-	case m.active == viewRaw:
-		body = m.rawView()
-	case !m.hasGood:
-		body = dimStyle.Render("\n  waiting for a parseable frame… (see 8 Raw for the byte stream)")
-	case m.active == viewSensors:
-		body = stream.SensorTableExtrema(m.lastGood.FrameEvent, m.def, m.mins, m.maxs)
-	case m.active == viewBLM:
-		body = stream.BLMBodyExplained(m.grid, m.lastGood.FrameEvent, m.minSamples)
-	case m.active == viewINT:
-		body = stream.INTBody(m.intGrid, m.lastGood.FrameEvent, m.minSamples, m.lastGood.Sensors["integrator"])
-	case m.active == viewO2:
-		body = stream.O2Body(m.o2Grid, m.lastGood.FrameEvent, m.lastGood.Sensors["oxygen_sensor"]/1000.0)
-	case m.active == viewSpark:
-		body = stream.SparkBody(m.sparkGrid, m.lastGood.FrameEvent, m.lastGood.Sensors["knock_count"])
-	case m.active == viewFlags:
-		body = stream.FlagsBody(m.lastGood.Flags)
-	case m.active == viewCodes:
-		body = stream.CodesBody(m.lastGood.Codes)
-	}
-
+	// Three-row bottom bar. Row 1: per-grid recording state (which grids are
+	// accumulating). Row 2: live session status — frame / time / loop badge (in
+	// place of the old PROM mark) / heartbeat / counts + recording-and-playback
+	// chrome + a transient notice. Row 3: the key legend (or the filename prompt
+	// while open), on its own line so the wide legend can't crowd the status.
 	status := fmt.Sprintf("frame %d   t=%.1fs   %s   %s %d ok / %d bad",
-		m.latest.Index, m.latest.Elapsed.Seconds(), promMark(m.latest.PROMOK),
+		m.latest.Index, m.latest.Elapsed.Seconds(), m.styledLoopBadge(),
 		m.heartbeat(), m.okCount, m.badCount)
 	if m.done {
 		status += "   " + dimStyle.Render("(stream ended)")
 	}
-	footer := status + m.sessionChrome()
-	if m.prompt != nil {
-		// The prompt replaces the notice/legend segment while it is open.
-		footer += "   " + m.promptLine()
-	} else {
-		if m.notice != "" {
-			footer += "   " + m.notice
-		}
-		footer += "   " + dimStyle.Render("1-8/tab · s save · c clear · r rec · d csv · space/± replay · q quit")
+	if stale, age := m.stale(); stale {
+		status += "   " + beatBad.Render(fmt.Sprintf("no data %.0fs", age.Seconds()))
 	}
+	status += m.sessionChrome()
+	if m.notice != "" {
+		status += "   " + m.notice
+	}
+	keys := dimStyle.Render(m.keyLegend())
+	if m.prompt != nil {
+		keys = m.promptLine()
+	}
+	footer := m.recDotsLine() + "\n" + status + "\n" + keys
 
-	return header + "\n" + m.loopStatusLine() + "\n\n" + body + "\n\n" + footer
+	// One blank line under the tab bar lets the table breathe (the loop line that
+	// used to sit here moved into the bottom bar), then the body, then the
+	// three-row footer pinned at the bottom. clampBody pads the body so the whole
+	// frame is exactly the terminal height — the footer sits on the last rows
+	// every render, so a resize can't leave a frozen copy behind.
+	frame := header + "\n\n" + m.clampBody(m.activeBody()) + "\n\n" + footer
+	return m.padHeight(m.fitWidth(frame))
+}
+
+// padHeight makes the frame exactly the terminal height — padding short frames
+// (e.g. the error panel) with blank lines and clamping over-tall ones — so every
+// screen row is written each render and a resize can't leave stale rows behind.
+// No-op before the first WindowSizeMsg (height 0).
+func (m tuiModel) padHeight(s string) string {
+	if m.height <= 0 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for len(lines) < m.height {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines[:m.height], "\n")
+}
+
+// fitWidth truncates every line of the frame to the terminal width, appending a
+// › cue when a line is cut, so nothing soft-wraps (a wrapped chrome line would
+// push the tab bar off the top, defeating the height clamp). ANSI-aware: styling
+// escapes pass through and are reset at the cut. The grid/sensor bodies already
+// truncate at column boundaries; this is the catch-all for the styled chrome and
+// prose bodies. No-op before the first WindowSizeMsg (width 0).
+func (m tuiModel) fitWidth(s string) string {
+	if m.width <= 0 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for i, ln := range lines {
+		lines[i] = ansi.Truncate(ln, m.width, "›")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// activeBody renders the current tab's content (no chrome). The grid tabs honour
+// the info accordion (m.showInfo); the Spark tab also carries the free-running
+// warning verdict.
+func (m tuiModel) activeBody() string {
+	switch {
+	case !m.hasFrame:
+		return dimStyle.Render("\n  waiting for frames…")
+	case m.active == viewRaw:
+		return m.rawView()
+	case !m.hasGood:
+		return dimStyle.Render("\n  waiting for a parseable frame… (see 8 Raw for the byte stream)")
+	case m.active == viewSensors:
+		return stream.SensorTableExtrema(m.lastGood.FrameEvent, m.def, m.mins, m.maxs, m.width)
+	case m.active == viewBLM:
+		return stream.BLMBodyDash(m.grid, m.lastGood.FrameEvent, m.minSamples, m.width, m.showInfo)
+	case m.active == viewINT:
+		return stream.INTBody(m.intGrid, m.lastGood.FrameEvent, m.minSamples, m.showInfo, m.width)
+	case m.active == viewO2:
+		return stream.O2Body(m.o2Grid, m.lastGood.FrameEvent, m.showInfo, m.width)
+	case m.active == viewSpark:
+		return stream.SparkBody(m.sparkGrid, m.lastGood.FrameEvent, m.knockFreeRunning(), m.showInfo, m.width)
+	case m.active == viewFlags:
+		return stream.FlagsBody(m.lastGood.Flags)
+	case m.active == viewCodes:
+		return stream.CodesBody(m.lastGood.Codes)
+	}
+	return ""
+}
+
+// keyLegend is the footer's key hint, context-trimmed: `i info` only appears on
+// the grid tabs, which are the only ones with an explainer to toggle.
+func (m tuiModel) keyLegend() string {
+	info := ""
+	if isGridTab(m.active) {
+		info = "i info · "
+	}
+	return "1-8/tab · " + info + "s save · c clear · r rec · d csv · space/± replay · q quit"
+}
+
+// chromeLines is the fixed non-body height of a frame: the tab bar, the blank
+// line above the body, the blank line below it, and the three-line bottom bar
+// (recording state, status, key legend).
+const chromeLines = 6
+
+// bodyBudget is how many lines the body may occupy after the fixed chrome. It is
+// unbounded before the first WindowSizeMsg (m.height 0), so the initial frame
+// renders in full.
+func (m tuiModel) bodyBudget() int {
+	if m.height <= 0 {
+		return 1 << 30
+	}
+	if b := m.height - chromeLines; b > 1 {
+		return b
+	}
+	return 1
+}
+
+// maxScroll is the largest useful scroll offset for the active body at the
+// current size (0 when it fits). One line of the budget is reserved for the
+// scroll status when the body overflows.
+func (m tuiModel) maxScroll() int {
+	budget := m.bodyBudget()
+	lines := strings.Count(m.activeBody(), "\n") + 1
+	if lines <= budget {
+		return 0
+	}
+	win := budget - 1
+	if win < 1 {
+		win = 1
+	}
+	return lines - win
+}
+
+// clampScroll keeps a proposed scroll offset within [0, maxScroll].
+func (m tuiModel) clampScroll(s int) int {
+	if s < 0 {
+		return 0
+	}
+	if max := m.maxScroll(); s > max {
+		return max
+	}
+	return s
+}
+
+// clampBody fits body to exactly bodyBudget lines. When it overflows, it shows a
+// scroll window (offset m.scroll) plus a one-line position/hint status; when it
+// fits, it pads with blank lines. Either way the body region is exactly the
+// budget, so the whole frame is exactly the terminal height and the footer sits
+// on the last row every render (no floating/ghosting on resize). No padding
+// before the first WindowSizeMsg (budget is unbounded).
+func (m tuiModel) clampBody(body string) string {
+	budget := m.bodyBudget()
+	lines := strings.Split(body, "\n")
+	if m.height <= 0 {
+		return body
+	}
+	if len(lines) <= budget {
+		for len(lines) < budget {
+			lines = append(lines, "")
+		}
+		return strings.Join(lines, "\n")
+	}
+	win := budget - 1
+	if win < 1 {
+		win = 1
+	}
+	maxScroll := len(lines) - win // local; avoids recomputing the body
+	s := m.scroll
+	if s > maxScroll {
+		s = maxScroll
+	}
+	if s < 0 {
+		s = 0
+	}
+	shown := strings.Join(lines[s:s+win], "\n")
+	status := dimStyle.Render(fmt.Sprintf("  ↑/↓ j/k scroll · lines %d–%d of %d", s+1, s+win, len(lines)))
+	return shown + "\n" + status
+}
+
+// isGridTab reports whether v is one of the RPM×MAP grid tabs (the ones with an
+// info-accordion explainer).
+func isGridTab(v view) bool {
+	return v == viewBLM || v == viewINT || v == viewO2 || v == viewSpark
 }
 
 // sessionChrome renders the persistent recording/logging/playback segments of
@@ -830,32 +1085,89 @@ func (m tuiModel) promptLine() string {
 	return fmt.Sprintf("%s: %s▌  %s", label, p.buf, dimStyle.Render(hint+" · enter confirm · esc cancel"))
 }
 
-// loopStatusLine renders the persistent recording-state line shown on every
-// tab, colouring the loop badge (green closed / amber open / dim unknown) from
-// the latest parseable frame's fuel-trim state.
-func (m tuiModel) loopStatusLine() string {
+// styledLoopBadge is the loop-state word (CLOSED LOOP / OPEN LOOP / LOOP —)
+// coloured from the latest parseable frame — green closed / amber open / dim
+// unknown. It sits in the footer status line in place of the old PROM mark
+// (PROM status is still carried by the heartbeat colour and the Raw tab).
+func (m tuiModel) styledLoopBadge() string {
+	ft := m.lastGood.FuelTrim
+	badge := stream.LoopBadge(ft, m.hasGood)
+	switch {
+	case !m.hasGood:
+		return dimStyle.Render(badge)
+	case ft.ClosedLoop:
+		return loopClosed.Render(badge)
+	default:
+		return loopOpen.Render(badge)
+	}
+}
+
+// recDotsLine is the per-grid recording state (rec: BLM ● INT ● … + a frozen/
+// disabled suffix) — the top row of the bottom bar. It shows which grids are
+// accumulating right now; the loop badge itself lives in the status line below.
+func (m tuiModel) recDotsLine() string {
 	ft := m.lastGood.FuelTrim
 	badge := stream.LoopBadge(ft, m.hasGood)
 	rest := strings.TrimPrefix(stream.LoopStatus(ft, m.hasGood), badge)
-	var style lipgloss.Style
-	switch {
-	case !m.hasGood:
-		style = dimStyle
-	case ft.ClosedLoop:
-		style = loopClosed
-	default:
-		style = loopOpen
-	}
-	return "  " + style.Render(badge) + rest
+	return dimStyle.Render(strings.TrimLeft(rest, " "))
 }
 
-// heartbeat is the per-frame data-quality tick: green when the latest frame
-// parsed and PROM-matched, red otherwise (WinALDL's flashing indicator).
+// heartbeat is the per-frame data-quality tick: green ● when the latest frame
+// parsed and PROM-matched, red ● otherwise (WinALDL's flashing indicator), and
+// a red hollow ○ when the live stream has gone stale — a glyph change, not just
+// colour, so a stalled connection reads even without colour.
 func (m tuiModel) heartbeat() string {
+	if stale, _ := m.stale(); stale {
+		return beatBad.Render("○")
+	}
 	if m.latest.ParseOK && m.latest.PROMOK {
 		return beatOK.Render("●")
 	}
 	return beatBad.Render("●")
+}
+
+// errorPanel renders the full-screen diagnosis shown when the session dies with
+// a transport error (typically a serial open/read failure). It replaces the tab
+// view — there is no data to show. Serial hints are offered only for a live
+// source.
+func (m tuiModel) errorPanel() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n  %s\n\n", beatBad.Render("⚠ Cannot read from "+m.source))
+	fmt.Fprintf(&b, "  %v\n\n", m.fatalErr)
+	if m.replay == nil { // live source: the failure is almost always the port/cable
+		fmt.Fprintf(&b, "  %s\n", dimStyle.Render("• Check the cable and run:  goaldl ports"))
+		fmt.Fprintf(&b, "  %s\n", dimStyle.Render("• Wrong baud rate?  add  -b 2400"))
+		fmt.Fprintf(&b, "  %s\n\n", dimStyle.Render("• Non-inverting cable?  add  -invert"))
+	}
+	fmt.Fprintf(&b, "  %s", dimStyle.Render("q quit"))
+	return b.String()
+}
+
+// pushKnock slides the free-running-knock window by one parsed frame, recording
+// whether it carried a nonzero KNOCK_CNT delta and keeping knockNonzero in sync.
+func (m *tuiModel) pushKnock(nonzero bool) {
+	if m.knockWindowCount == knockWindowSize && m.knockWindow[m.knockWindowHead] {
+		m.knockNonzero-- // evicting a nonzero entry
+	}
+	m.knockWindow[m.knockWindowHead] = nonzero
+	if nonzero {
+		m.knockNonzero++
+	}
+	m.knockWindowHead = (m.knockWindowHead + 1) % knockWindowSize
+	if m.knockWindowCount < knockWindowSize {
+		m.knockWindowCount++
+	}
+}
+
+// knockFreeRunning reports whether KNOCK_CNT is advancing on most recent frames
+// — the signature of a free-running counter (not a knock signal) on this
+// vehicle. False until knockWindowMin frames are seen, so it never warns on the
+// first second of data.
+func (m tuiModel) knockFreeRunning() bool {
+	if m.knockWindowCount < knockWindowMin {
+		return false
+	}
+	return float64(m.knockNonzero)/float64(m.knockWindowCount) >= knockFreeFrac
 }
 
 func (m tuiModel) rawView() string {

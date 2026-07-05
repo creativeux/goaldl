@@ -65,11 +65,11 @@ func launchTUI(args []string) {
 func printUsage() {
 	fmt.Println("goaldl - ALDL scanner and datalogger for GM ECMs")
 	fmt.Println()
-	fmt.Println("Interactive dashboard (default) — tab between sensors / BLM grid / raw:")
+	fmt.Println("Interactive dashboard (default) — sensors · fuel-trim grids · flags · codes · raw:")
 	fmt.Println("  goaldl -p /dev/cu.usbserial-10     live from the ECM")
 	fmt.Println("  goaldl drive_4800.raw              replay a capture")
 	fmt.Println("  goaldl                             auto-connect if one USB serial port is present")
-	fmt.Println("  keys: 1-3 / tab switch views · q quit")
+	fmt.Println("  keys: 1-8 select tab · tab/←→ cycle · s save · c clear · r rec · d csv · space/± replay · q quit")
 	fmt.Println()
 	fmt.Println("Commands (scripting / headless):")
 	fmt.Println("  record     Capture raw UART bytes to a file (no processing)")
