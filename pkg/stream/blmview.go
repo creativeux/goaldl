@@ -43,7 +43,8 @@ func (v *BLMView) Render(ev FrameEvent) {
 	}
 	titleLine := fmt.Sprintf("%s   frame %d   t=%.1fs   %d cells ready",
 		v.title, ev.Index, ev.Elapsed.Seconds(), v.Grid.PopulatedCells(v.minCount))
-	body := titleLine + "\n" + BLMBody(v.Grid, ev, v.minCount)
+	// width 0: the streaming view is a fixed in-place redraw, not width-clamped.
+	body := titleLine + "\n" + BLMBody(v.Grid, ev, v.minCount, 0)
 	if v.lastLines > 0 {
 		fmt.Fprintf(v.w, "\033[%dA", v.lastLines)
 	}
@@ -58,19 +59,21 @@ func (v *BLMView) Render(ev FrameEvent) {
 // the compact one-line legend — the streaming `monitor -blm` variant, which
 // redraws in place and keeps its chrome tight. It reads the grid but does not
 // modify it.
-func BLMBody(g *blm.Grid, ev FrameEvent, minCount int) string {
+// width caps the MAP columns to fit a narrow terminal (0 = no limit; the
+// streaming monitor passes 0, the dashboard passes its width).
+func BLMBody(g *blm.Grid, ev FrameEvent, minCount, width int) string {
 	legend := fmt.Sprintf("  target 128:  >128 lean, <128 rich;  · = no data, dim = <%d samples", minCount)
-	return blmBody(g, ev, minCount, legend)
+	return blmBody(g, ev, minCount, legend, width)
 }
 
 // BLMBodyExplained is BLMBody with the full "what this table means" block in
 // place of the compact legend — the dashboard variant, where the explainer is
 // visible under the grid.
-func BLMBodyExplained(g *blm.Grid, ev FrameEvent, minCount int) string {
-	return blmBody(g, ev, minCount, blmExplainer)
+func BLMBodyExplained(g *blm.Grid, ev FrameEvent, minCount, width int) string {
+	return blmBody(g, ev, minCount, blmExplainer, width)
 }
 
-func blmBody(g *blm.Grid, ev FrameEvent, minCount int, legend string) string {
+func blmBody(g *blm.Grid, ev FrameEvent, minCount int, legend string, width int) string {
 	ft := ecm.FuelTrimSample(ev.Frame.Data)
 	ar, ac := -1, -1
 	if ft.Recordable() {
@@ -89,5 +92,5 @@ func blmBody(g *blm.Grid, ev FrameEvent, minCount int, legend string) string {
 	default:
 		status = "block learn disabled — not recording"
 	}
-	return gridHeat(g, g.Average(), ar, ac, minCount, 0, status, legend)
+	return gridHeat(g, g.Average(), ar, ac, minCount, 0, status, legend, width)
 }

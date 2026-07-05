@@ -15,6 +15,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"goaldl/pkg/blm"
 	"goaldl/pkg/decoder"
@@ -833,7 +834,7 @@ var (
 
 func (m tuiModel) View() string {
 	if m.fatalErr != nil {
-		return m.errorPanel()
+		return m.fitWidth(m.errorPanel())
 	}
 	tabs := []string{"1 Sensors", "2 BLM", "3 INT", "4 O2", "5 Spark", "6 Flags", "7 Codes", "8 Raw"}
 	rendered := make([]string, len(tabs))
@@ -869,7 +870,25 @@ func (m tuiModel) View() string {
 	// Pin the tab bar and loop line at the top and the footer at the bottom by
 	// clamping the body to the height left between them — so a short terminal
 	// never scrolls the tabs off the top (the body scrolls instead, j/k/↑/↓).
-	return header + "\n" + m.loopStatusLine() + "\n\n" + m.clampBody(m.activeBody()) + "\n\n" + footer
+	frame := header + "\n" + m.loopStatusLine() + "\n\n" + m.clampBody(m.activeBody()) + "\n\n" + footer
+	return m.fitWidth(frame)
+}
+
+// fitWidth truncates every line of the frame to the terminal width, appending a
+// › cue when a line is cut, so nothing soft-wraps (a wrapped chrome line would
+// push the tab bar off the top, defeating the height clamp). ANSI-aware: styling
+// escapes pass through and are reset at the cut. The grid/sensor bodies already
+// truncate at column boundaries; this is the catch-all for the styled chrome and
+// prose bodies. No-op before the first WindowSizeMsg (width 0).
+func (m tuiModel) fitWidth(s string) string {
+	if m.width <= 0 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for i, ln := range lines {
+		lines[i] = ansi.Truncate(ln, m.width, "›")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // activeBody renders the current tab's content (no chrome). The grid tabs honour
@@ -884,18 +903,18 @@ func (m tuiModel) activeBody() string {
 	case !m.hasGood:
 		return dimStyle.Render("\n  waiting for a parseable frame… (see 8 Raw for the byte stream)")
 	case m.active == viewSensors:
-		return stream.SensorTableExtrema(m.lastGood.FrameEvent, m.def, m.mins, m.maxs)
+		return stream.SensorTableExtrema(m.lastGood.FrameEvent, m.def, m.mins, m.maxs, m.width)
 	case m.active == viewBLM:
 		if m.showInfo {
-			return stream.BLMBodyExplained(m.grid, m.lastGood.FrameEvent, m.minSamples)
+			return stream.BLMBodyExplained(m.grid, m.lastGood.FrameEvent, m.minSamples, m.width)
 		}
-		return stream.BLMBody(m.grid, m.lastGood.FrameEvent, m.minSamples)
+		return stream.BLMBody(m.grid, m.lastGood.FrameEvent, m.minSamples, m.width)
 	case m.active == viewINT:
-		return stream.INTBody(m.intGrid, m.lastGood.FrameEvent, m.minSamples, m.lastGood.Sensors["integrator"], m.showInfo)
+		return stream.INTBody(m.intGrid, m.lastGood.FrameEvent, m.minSamples, m.lastGood.Sensors["integrator"], m.showInfo, m.width)
 	case m.active == viewO2:
-		return stream.O2Body(m.o2Grid, m.lastGood.FrameEvent, m.lastGood.Sensors["oxygen_sensor"]/1000.0, m.showInfo)
+		return stream.O2Body(m.o2Grid, m.lastGood.FrameEvent, m.lastGood.Sensors["oxygen_sensor"]/1000.0, m.showInfo, m.width)
 	case m.active == viewSpark:
-		return stream.SparkBody(m.sparkGrid, m.lastGood.FrameEvent, m.lastGood.Sensors["knock_count"], m.knockFreeRunning(), m.showInfo)
+		return stream.SparkBody(m.sparkGrid, m.lastGood.FrameEvent, m.lastGood.Sensors["knock_count"], m.knockFreeRunning(), m.showInfo, m.width)
 	case m.active == viewFlags:
 		return stream.FlagsBody(m.lastGood.Flags)
 	case m.active == viewCodes:

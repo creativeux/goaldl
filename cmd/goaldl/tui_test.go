@@ -12,6 +12,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"goaldl/pkg/blm"
 	"goaldl/pkg/decoder"
@@ -970,6 +971,29 @@ func TestTUIBodyScroll(t *testing.T) {
 	switched, _ := hammered.Update(runes('1'))
 	if s := switched.(tuiModel).scroll; s != 0 {
 		t.Errorf("switching tabs should reset scroll, got %d", s)
+	}
+}
+
+// TestTUIWidthFit: on a narrow terminal every line of the frame fits the width
+// (no soft-wrap), so the pinned tab bar can't be pushed off by a wrapped chrome
+// line — including the long footer key legend and the wide Spark grid.
+func TestTUIWidthFit(t *testing.T) {
+	m := testModel()
+	m.width, m.height = 44, 24
+	next, _ := m.Update(snapshotMsg(recordableSnapshot()))
+	mm := next.(tuiModel)
+
+	for _, tab := range []view{viewSensors, viewSpark, viewRaw, viewBLM} {
+		mm.active = tab
+		v := mm.View()
+		if !strings.Contains(v, "Sensors") {
+			t.Errorf("tab %d: tab bar must stay visible", tab)
+		}
+		for _, ln := range strings.Split(v, "\n") {
+			if w := ansi.StringWidth(ln); w > mm.width {
+				t.Errorf("tab %d: line exceeds width %d (%d): %q", tab, mm.width, w, ln)
+			}
+		}
 	}
 }
 

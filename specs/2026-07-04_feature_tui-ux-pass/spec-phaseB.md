@@ -1,9 +1,9 @@
 <!-- SDA: v1.0 -->
 # Spec: TUI UX Pass — Phase B (Layout Resilience), slice 1
 
-**Scope**: the layout defects the user hit directly (2026-07-04) — B.1 (short terminal scrolls the tab bar off the top, no way to scroll the body) and B.4 (grid explainers eat vertical space; hide them behind an info accordion). B.3 (collapse trailing empty grid rows) was implemented then **reverted at the user's request** ("show the full table all the time") — see §B.3 REVERTED. B.2 (width awareness) remains **deferred**. Presentation-only: no `Session`/`Snapshot`/`ecm`/`decoder`/`blm` change, no new dependency.
+**Scope**: the layout defects the user hit directly (2026-07-04) — B.1 (short terminal scrolls the tab bar off the top, no way to scroll the body), B.4 (grid explainers eat vertical space; hide them behind an info accordion), and B.2 (wide views wrap on a narrow terminal). B.3 (collapse trailing empty grid rows) was implemented then **reverted at the user's request** ("show the full table all the time") — see §B.3 REVERTED. Presentation-only for the layering seam (no `Session`/`Snapshot`/`ecm`/`decoder`/`blm` change); B.2 promotes `x/ansi` from indirect to a direct dep (already in the build graph — see §B.2).
 
-**As-shipped**: B.1 + B.4 only. The full RPM×MAP grid always renders every row; on a short terminal it scrolls (B.1), tab bar pinned.
+**As-shipped**: B.1 + B.4 + B.2. The full RPM×MAP grid always renders every row; a short terminal scrolls (B.1) with the tab bar pinned; a narrow terminal truncates with a `›` cue (B.2).
 
 **User decision (2026-07-04, direct feedback)**: "In a short terminal, the tabs are hidden on top and there's no way to scroll. Also, the helper text for each table is just taking up unnecessary vertical space. It would be better to hide those in an accordion under an 'i' info icon." → explainers **collapsed by default**, toggled by `i`; the body scrolls so the pinned tab bar never disappears.
 
@@ -65,18 +65,39 @@ On the drive fixture the BLM grid drops from 16 RPM rows to the 8 populated ones
 ### Test oracle
 `TestGridCollapse`: trailing empty rows summarized (`(RPM 2000–6400 empty)`), the populated 1600 row and interior empties kept, the empty 6400 row not drawn; the monitor path (`BLMBody(…, false)`) draws every row with no summary; an empty high-RPM active row stays visible; `Grid.RenderInt` (saved file) still contains every row.
 
-## Deferred (not in this slice)
-- **B.2 width awareness**: wide bodies (spark grid 83 cols, 6-col sensor table ~100) still wrap below ~84/~100 cols. The height fix is independent; width is a separate follow-up.
+## B.2 — Width awareness (added 2026-07-04)
+
+**User decision**: truncate-with-cue (over horizontal scroll); the sensor table drops ALT first, then RAW.
+
+The height work (B.1) assumed the chrome never soft-wraps; below ~90 cols the footer key legend wrapped, which broke the height clamp (the evaluator's note #1). B.2 makes the frame width-safe in three layers:
+
+1. **Grids** (`gridHeat` gains `width int`): cap the MAP columns to what fits at a **whole-column boundary** and append a ` ›` cue — never a partial number (a truncated "6232"→"62" would misread as a smaller value in a tuning tool). `width<=0` = no limit. Threaded through `blmBody`/`BLMBody`/`BLMBodyExplained`/`INTBody`/`O2Body`/`SparkBody`; the streaming `monitor -blm` passes `0` (its fixed in-place redraw isn't width-clamped).
+2. **Sensor table** (`SensorTableExtrema`/`renderTableExtrema` gain `width int`): drop the lowest-value columns in order — **ALT, then RAW** — while the table exceeds width, keeping SENSOR/VALUE/MIN/MAX. Rewritten column-driven so dropping is clean.
+3. **Chrome + residual** (`tuiModel.fitWidth`): a final pass truncates every line of the assembled frame (tab bar, loop line, footer, and any body still over-wide) to `m.width` with a `›` cue, ANSI-aware via `github.com/charmbracelet/x/ansi` (`ansi.Truncate`). This is the load-bearing fix — it guarantees no line soft-wraps, so a wrapped chrome line can never push the tab bar off the top. No-op before the first `WindowSizeMsg`.
+
+**Dependency note**: `x/ansi` was promoted from an indirect to a direct dependency (same version `v0.10.1`, already in the build graph via lipgloss/bubbletea — `go.sum` unchanged, zero new code). It's the canonical, correct tool for ANSI-aware width truncation; hand-rolling it would reinvent a battle-tested library (consolidate-over-accrete).
+
+### Test oracle
+`TestGridWidthTruncation` (narrow grid caps columns + shows `›`, no partial number, display width ≤ width; width 0 = all columns), `TestSensorTableColumnDrop` (ALT drops first, then RAW; SENSOR/VALUE always survive), `TestTUIWidthFit` (at width 44 every frame line's display width ≤ 44 across Sensors/Spark/Raw/BLM, tab bar still present).
+
+### Effect
+At 64 cols: the Spark grid shows 10 of 15 MAP columns + `›` (clean boundary); the sensor table drops ALT + RAW (SENSOR/VALUE/MIN shown, MAX truncated by the residual pass); the tab bar/status/footer truncate with `›` instead of wrapping. The tab bar stays pinned at every width.
+
+## Deferred (not pursued)
+- **Sub-6-row terminals** (evaluator note #2): `bodyBudget` floors at 1, so a window shorter than the 5-line chrome + 1 body line still overflows. Not a realistic "short terminal"; could drop the blank separators / loop line under extreme height pressure — low value, deferred.
 
 ## Files changed
 | File | Change |
 |---|---|
-*(B.3-only changes were fully reverted; the table below is the as-shipped B.1+B.4 state.)*
+*(B.3-only changes were fully reverted; the table below is the as-shipped B.1+B.4+B.2 state.)*
 
-| `pkg/stream/gridviews.go` | compact legend consts; `showInfo bool` on `INTBody`/`O2Body`/`SparkBody`; 4-way spark legend |
-| `cmd/goaldl/tui.go` | `showInfo`/`scroll` fields; `i`/`j`/`k`/`↑`/`↓` keys + scroll-reset on tab change; `View` restructured around `activeBody`/`clampBody`; `bodyBudget`/`maxScroll`/`clampScroll`/`isGridTab`/`keyLegend` helpers; BLM accordion via `BLMBody`/`BLMBodyExplained` |
-| `pkg/stream/gridviews_test.go` | builder call sites updated; `TestGridLegendAccordion` (collapsed legends) |
-| `cmd/goaldl/tui_test.go` | `TestTUIViewPerTab` updated for the accordion; `TestTUIInfoAccordion`; `TestTUIBodyScroll` |
+| `pkg/stream/gridviews.go` | compact legend consts; `showInfo bool` on `INTBody`/`O2Body`/`SparkBody`; 4-way spark legend; **B.2**: `width int` on `gridHeat`/`INTBody`/`O2Body`/`SparkBody` — column-boundary truncation + `›` cue |
+| `pkg/stream/blmview.go` | **B.2**: `width int` on `BLMBody`/`BLMBodyExplained`/`blmBody`; `BLMView.Render` passes `0` (monitor unaffected) |
+| `pkg/stream/table.go` | **B.2**: `width int` on `SensorTableExtrema`; `renderTableExtrema` rewritten column-driven, drops ALT then RAW |
+| `cmd/goaldl/tui.go` | `showInfo`/`scroll` fields; `i`/`j`/`k`/`↑`/`↓` keys + scroll-reset on tab change; `View` restructured around `activeBody`/`clampBody`; `bodyBudget`/`maxScroll`/`clampScroll`/`isGridTab`/`keyLegend` helpers; BLM accordion via `BLMBody`/`BLMBodyExplained`; **B.2**: `fitWidth` (ANSI-aware, `x/ansi`), `m.width` threaded into all body builders, applied to the frame + error panel |
+| `go.mod` | **B.2**: `x/ansi` indirect → direct (v0.10.1, `go.sum` unchanged) |
+| `pkg/stream/gridviews_test.go` | builder call sites updated; `TestGridLegendAccordion`; **B.2**: `TestGridWidthTruncation`, `TestSensorTableColumnDrop` |
+| `cmd/goaldl/tui_test.go` | `TestTUIViewPerTab` (accordion); `TestTUIInfoAccordion`; `TestTUIBodyScroll`; **B.2**: `TestTUIWidthFit` |
 
 ## Regression
 `go test -race ./...` green; goldens byte-identical (no `-update`); `blm` still 469; forbidden-seam diff (`session.go`/`stream.go`/`ecm`/`decoder`/`blm`/`go.mod`/`go.sum`) empty — the only `pkg/stream` change is the `gridviews.go` presentation builders.

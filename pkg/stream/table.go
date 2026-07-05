@@ -192,11 +192,12 @@ func SensorTable(ev FrameEvent, def *ecm.Definition) string {
 	return renderTable(rowsFor(ev, def))
 }
 
-// SensorTableExtrema renders the 6-column dashboard table
-// (SENSOR·RAW·VALUE·MIN·MAX·ALT), with per-sensor extrema from mins/maxs. When
-// mins is nil it falls back to the 4-column SensorTable, so the monitor path is
-// unchanged.
-func SensorTableExtrema(ev FrameEvent, def *ecm.Definition, mins, maxs map[string]float64) string {
+// SensorTableExtrema renders the dashboard table (SENSOR·RAW·VALUE·MIN·MAX·ALT),
+// with per-sensor extrema from mins/maxs. When mins is nil it falls back to the
+// 4-column SensorTable, so the monitor path is unchanged. width, when > 0, drops
+// the lowest-value columns (ALT, then RAW) so the core SENSOR/VALUE/MIN/MAX stay
+// readable on a narrow terminal instead of wrapping.
+func SensorTableExtrema(ev FrameEvent, def *ecm.Definition, mins, maxs map[string]float64, width int) string {
 	if mins == nil {
 		return SensorTable(ev, def)
 	}
@@ -204,38 +205,74 @@ func SensorTableExtrema(ev FrameEvent, def *ecm.Definition, mins, maxs map[strin
 	if err != nil {
 		parsed = map[string]float64{}
 	}
-	return renderTableExtrema(BuildRowsExtrema(ev.Frame.Data, def, parsed, mins, maxs))
+	return renderTableExtrema(BuildRowsExtrema(ev.Frame.Data, def, parsed, mins, maxs), width)
 }
 
-// renderTableExtrema formats rows into the aligned six-column table (no
-// trailing newline on the last line).
-func renderTableExtrema(rows []Row) string {
-	const (
-		hSensor = "SENSOR"
-		hRaw    = "RAW"
-		hValue  = "VALUE"
-		hMin    = "MIN"
-		hMax    = "MAX"
-		hAlt    = "ALT"
-	)
-	wS, wR, wV, wMin, wMax := len(hSensor), len(hRaw), len(hValue), len(hMin), len(hMax)
-	for _, r := range rows {
-		wS = max(wS, len(r.Sensor))
-		wR = max(wR, len(r.Raw))
-		wV = max(wV, len(r.Value))
-		wMin = max(wMin, len(r.Min))
-		wMax = max(wMax, len(r.Max))
+// renderTableExtrema formats rows into the aligned dashboard table (no trailing
+// newline on the last line). Columns are dropped in order — ALT first, then RAW
+// — while the table is wider than width (width<=0 keeps all columns).
+func renderTableExtrema(rows []Row, width int) string {
+	cols := []struct {
+		header string
+		get    func(Row) string
+		w      int
+	}{
+		{"SENSOR", func(r Row) string { return r.Sensor }, 0},
+		{"RAW", func(r Row) string { return r.Raw }, 0},
+		{"VALUE", func(r Row) string { return r.Value }, 0},
+		{"MIN", func(r Row) string { return r.Min }, 0},
+		{"MAX", func(r Row) string { return r.Max }, 0},
+		{"ALT", func(r Row) string { return r.Alt }, 0},
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "%-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
-		wS, hSensor, wR, hRaw, wV, hValue, wMin, hMin, wMax, hMax, hAlt)
-	fmt.Fprintf(&b, "%s\n", strings.Repeat("─", wS+wR+wV+wMin+wMax+len(hAlt)+10))
-	for i, r := range rows {
-		fmt.Fprintf(&b, "%-*s  %-*s  %-*s  %-*s  %-*s  %s",
-			wS, r.Sensor, wR, r.Raw, wV, r.Value, wMin, r.Min, wMax, r.Max, r.Alt)
-		if i < len(rows)-1 {
-			b.WriteByte('\n')
+	for i := range cols {
+		w := len(cols[i].header)
+		for _, r := range rows {
+			w = max(w, len(cols[i].get(r)))
 		}
+		cols[i].w = w
+	}
+	keep := make([]bool, len(cols))
+	for i := range keep {
+		keep[i] = true
+	}
+	tableW := func() int {
+		total, n := 0, 0
+		for i, c := range cols {
+			if keep[i] {
+				total += c.w
+				n++
+			}
+		}
+		if n > 1 {
+			total += 2 * (n - 1) // two spaces between columns
+		}
+		return total
+	}
+	for _, drop := range []int{5, 1} { // ALT first, then RAW
+		if width <= 0 || tableW() <= width {
+			break
+		}
+		keep[drop] = false
+	}
+
+	line := func(get func(int) string) string {
+		var parts []string
+		for i, c := range cols {
+			if keep[i] {
+				parts = append(parts, fmt.Sprintf("%-*s", c.w, get(i)))
+			}
+		}
+		return strings.TrimRight(strings.Join(parts, "  "), " ")
+	}
+
+	var b strings.Builder
+	b.WriteString(line(func(i int) string { return cols[i].header }))
+	b.WriteByte('\n')
+	b.WriteString(strings.Repeat("─", tableW()))
+	for i := range rows {
+		b.WriteByte('\n')
+		r := rows[i]
+		b.WriteString(line(func(j int) string { return cols[j].get(r) }))
 	}
 	return b.String()
 }
