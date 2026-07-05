@@ -366,6 +366,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.scroll = m.clampScroll(m.scroll) // the new height changes maxScroll
+		// Clear on resize: we always emit a full terminal-height frame, but the
+		// terminal may leave stale rows from the old size — wipe them so a shrunk
+		// frame can't leave a frozen copy of the old footer behind.
+		return m, tea.ClearScreen
 
 	case tea.KeyMsg:
 		// An open filename prompt captures every key (digits, q, … type into
@@ -834,7 +839,7 @@ var (
 
 func (m tuiModel) View() string {
 	if m.fatalErr != nil {
-		return m.fitWidth(m.errorPanel())
+		return m.padHeight(m.fitWidth(m.errorPanel()))
 	}
 	tabs := []string{"1 Sensors", "2 BLM", "3 INT", "4 O2", "5 Spark", "6 Flags", "7 Codes", "8 Raw"}
 	rendered := make([]string, len(tabs))
@@ -847,6 +852,8 @@ func (m tuiModel) View() string {
 	}
 	header := lipgloss.JoinHorizontal(lipgloss.Top, rendered...) + "   " + dimStyle.Render(m.source)
 
+	// Footer line 1: live session status (frame / time / PROM / heartbeat /
+	// counts) + recording-and-playback chrome + a transient notice.
 	status := fmt.Sprintf("frame %d   t=%.1fs   %s   %s %d ok / %d bad",
 		m.latest.Index, m.latest.Elapsed.Seconds(), promMark(m.latest.PROMOK),
 		m.heartbeat(), m.okCount, m.badCount)
@@ -856,22 +863,40 @@ func (m tuiModel) View() string {
 	if stale, age := m.stale(); stale {
 		status += "   " + beatBad.Render(fmt.Sprintf("no data %.0fs", age.Seconds()))
 	}
-	footer := status + m.sessionChrome()
-	if m.prompt != nil {
-		// The prompt replaces the notice/legend segment while it is open.
-		footer += "   " + m.promptLine()
-	} else {
-		if m.notice != "" {
-			footer += "   " + m.notice
-		}
-		footer += "   " + dimStyle.Render(m.keyLegend())
+	status += m.sessionChrome()
+	if m.notice != "" {
+		status += "   " + m.notice
 	}
+	// Footer line 2: the key legend, or the filename prompt while it is open.
+	// Splitting the legend onto its own line keeps the wide legend from crowding
+	// the status (each line is width-truncated independently by fitWidth).
+	keys := dimStyle.Render(m.keyLegend())
+	if m.prompt != nil {
+		keys = m.promptLine()
+	}
+	footer := status + "\n" + keys
 
-	// Pin the tab bar and loop line at the top and the footer at the bottom by
-	// clamping the body to the height left between them — so a short terminal
-	// never scrolls the tabs off the top (the body scrolls instead, j/k/↑/↓).
+	// Pin the tab bar/loop line at the top and the two-line footer at the bottom,
+	// with the body clamped to the height between them. clampBody pads the body
+	// so the whole frame is exactly the terminal height — the footer sits on the
+	// last row every render, so a resize can't leave a frozen copy behind.
 	frame := header + "\n" + m.loopStatusLine() + "\n\n" + m.clampBody(m.activeBody()) + "\n\n" + footer
-	return m.fitWidth(frame)
+	return m.padHeight(m.fitWidth(frame))
+}
+
+// padHeight makes the frame exactly the terminal height — padding short frames
+// (e.g. the error panel) with blank lines and clamping over-tall ones — so every
+// screen row is written each render and a resize can't leave stale rows behind.
+// No-op before the first WindowSizeMsg (height 0).
+func (m tuiModel) padHeight(s string) string {
+	if m.height <= 0 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for len(lines) < m.height {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines[:m.height], "\n")
 }
 
 // fitWidth truncates every line of the frame to the terminal width, appending a
@@ -934,8 +959,9 @@ func (m tuiModel) keyLegend() string {
 }
 
 // chromeLines is the fixed non-body height of a frame: the tab bar, the loop
-// line, the blank line above the body, the blank line below it, and the footer.
-const chromeLines = 5
+// line, the blank line above the body, the blank line below it, and the
+// two-line footer (status + key legend).
+const chromeLines = 6
 
 // bodyBudget is how many lines the body may occupy after the fixed chrome. It is
 // unbounded before the first WindowSizeMsg (m.height 0), so the initial frame
@@ -977,14 +1003,23 @@ func (m tuiModel) clampScroll(s int) int {
 	return s
 }
 
-// clampBody trims body to bodyBudget lines. When it overflows, it shows a scroll
-// window (offset m.scroll) plus a one-line position/hint status, so the total is
-// exactly the budget and nothing pushes the tab bar off the top.
+// clampBody fits body to exactly bodyBudget lines. When it overflows, it shows a
+// scroll window (offset m.scroll) plus a one-line position/hint status; when it
+// fits, it pads with blank lines. Either way the body region is exactly the
+// budget, so the whole frame is exactly the terminal height and the footer sits
+// on the last row every render (no floating/ghosting on resize). No padding
+// before the first WindowSizeMsg (budget is unbounded).
 func (m tuiModel) clampBody(body string) string {
 	budget := m.bodyBudget()
 	lines := strings.Split(body, "\n")
-	if len(lines) <= budget {
+	if m.height <= 0 {
 		return body
+	}
+	if len(lines) <= budget {
+		for len(lines) < budget {
+			lines = append(lines, "")
+		}
+		return strings.Join(lines, "\n")
 	}
 	win := budget - 1
 	if win < 1 {

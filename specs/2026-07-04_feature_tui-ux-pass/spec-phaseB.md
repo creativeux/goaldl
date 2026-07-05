@@ -14,24 +14,30 @@ This corrects the empirical assumption in the heuristic analysis (F4 originally 
 ## B.1 — Pinned chrome + scrollable body
 
 ### Design
-`View()` now guarantees the rendered frame is **≤ terminal height**, so nothing scrolls and the tab bar stays put.
+`View()` renders a frame of **exactly the terminal height**, with the tab bar/loop line pinned at the top and a two-line footer pinned at the bottom.
 
-- **Fixed chrome = 5 lines**: tab bar, loop-status line, the blank line above the body, the blank line below it, and the footer. `chromeLines` const.
+- **Fixed chrome = 6 lines**: tab bar, loop-status line, the blank line above the body, the blank line below it, and the **two-line footer** (status line + key-legend line — split 2026-07-04, see below). `chromeLines` const.
 - `bodyBudget() = height − chromeLines` (min 1); unbounded before the first `WindowSizeMsg` (`height == 0`) so the initial frame renders in full.
 - `activeBody()` extracts the per-tab content switch (was inline in `View`).
-- `clampBody(body)`: if the body fits the budget, return it unchanged. Otherwise show a scroll window of `budget − 1` lines starting at `m.scroll`, plus a reserved status line: `↑/↓ j/k scroll · lines A–B of N`. The clipped result is exactly `budget` lines, so `chrome + body == height`.
-- **Scroll state** `m.scroll`: `j`/`down` increment, `k`/`up` decrement, both via `clampScroll` (→ `[0, maxScroll]`, where `maxScroll` is computed from the active body at the current size). Switching tabs and toggling the accordion re-home `scroll` to 0. `View`'s clamp re-bounds defensively so a size change can't leave a stale offset.
+- `clampBody(body)` fits the body to **exactly** `bodyBudget` lines: if it fits, **pad with blank lines**; if it overflows, show a scroll window of `budget − 1` lines from `m.scroll` + a reserved status line `↑/↓ j/k scroll · lines A–B of N`. Either way the body region is exactly the budget, so `chrome + body == height` and the footer is on the last row every render.
+- `padHeight()` is a final safety net that pads/clamps the whole frame (and the variable-height error panel) to exactly `m.height`.
+- **Scroll state** `m.scroll`: `j`/`down` increment, `k`/`up` decrement via `clampScroll` (→ `[0, maxScroll]`). Switching tabs and toggling the accordion re-home `scroll` to 0; **`WindowSizeMsg` re-clamps** it (a grown terminal can't leave the offset past the new end).
+
+### Two-line footer + resize ghosting (2026-07-04, user report)
+The user hit two problems on resize: the one-line footer was too wide, and resizing larger/smaller left a **frozen duplicate footer** (an old render's footer stranded on a screen row the new, differently-sized frame no longer wrote). Both are fixed by rendering a constant full-height frame:
+- **Footer split into two lines**: line 1 = live status (`frame/t/PROM/heartbeat/counts`) + recording/playback chrome + notice; line 2 = the key legend (or the filename prompt while open). Each line is width-truncated independently by `fitWidth`, so the wide legend no longer crowds or truncates the status.
+- **Constant height + clear**: `clampBody`/`padHeight` make every frame exactly `m.height` lines (footer always on the last row), and `Update` returns `tea.ClearScreen` on `WindowSizeMsg` to wipe any stale rows the terminal kept from the old size. Together these guarantee every screen row is rewritten each render — no floating or frozen footer.
 
 ### Keys added
 `i` (accordion), `j`/`down` (scroll down), `k`/`up` (scroll up). These were free — `left`/`right`/`h`/`l`/`tab` remain tab navigation; `j`/`k` follow vim down/up, consistent with `h`/`l`.
 
 ### Guarantee (test oracle)
-On an 80×12 terminal driven over the drive fixture, the Raw tab (tallest body) renders a frame of ≤ 12 lines, the tab bar (`Sensors`) is present, and the scroll status appears. `j` advances the offset; `k` at the top holds 0; hammering `j` clamps at `maxScroll`; switching tabs resets to 0. (`TestTUIBodyScroll`.)
+On an 80×12 terminal driven over the drive fixture, the Raw tab (tallest body) renders with the tab bar present and the scroll status shown; `j` advances the offset, `k` at the top holds 0, hammering `j` clamps at `maxScroll`, switching tabs resets to 0 (`TestTUIBodyScroll`). `TestTUIFrameHeight` asserts the frame is **exactly** the terminal height at 12/20/30/44 rows, the last line is the key legend and the second-to-last is the status, and a resize re-clamps scroll + returns a clear command.
 
 ### Edge cases
-- **height 0** (pre-size): no clamp, full render — the model gets a `WindowSizeMsg` immediately on program start, so this is a single transient frame.
-- **height < 6**: `bodyBudget` floors at 1; a sub-6-line terminal still overflows (can't fit tabs+loop+footer+1 body line) — accepted degenerate case.
-- **narrow width**: not addressed here (B.2). If the footer/loop line wraps in a very narrow terminal the line count is thrown off; standard terminals (≥ ~80 cols) don't wrap the chrome.
+- **height 0** (pre-size): no clamp/pad, full render — the model gets a `WindowSizeMsg` immediately on program start, so this is a single transient frame.
+- **height < 7**: `bodyBudget` floors at 1 so the frame wants 7 lines; `padHeight` clamps to `m.height`, which can cut the footer — accepted degenerate case (a sub-7-row terminal can't show tabs+loop+2-line-footer+1 body line).
+- **narrow width**: addressed in B.2 (`fitWidth` truncates each line, so a wrapped chrome line can't throw off the height math).
 
 ## B.4 — Info accordion
 

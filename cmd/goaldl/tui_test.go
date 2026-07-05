@@ -974,6 +974,43 @@ func TestTUIBodyScroll(t *testing.T) {
 	}
 }
 
+// TestTUIFrameHeight: the frame is always exactly the terminal height (footer
+// pinned to the last row, body padded or scrolled to fill) — so resizing can't
+// leave a frozen copy of the old footer behind. The footer is two lines: the
+// live status, then the key legend.
+func TestTUIFrameHeight(t *testing.T) {
+	m := testModel()
+	next, _ := m.Update(snapshotMsg(recordableSnapshot()))
+	mm := next.(tuiModel)
+	for _, h := range []int{12, 20, 30, 44} {
+		sized, _ := mm.Update(tea.WindowSizeMsg{Width: 80, Height: h})
+		fm := sized.(tuiModel)
+		fm.active = viewSensors
+		lines := strings.Split(fm.View(), "\n")
+		if len(lines) != h {
+			t.Errorf("height %d: frame has %d lines, want exactly %d", h, len(lines), h)
+		}
+		if last := lines[len(lines)-1]; !strings.Contains(last, "q quit") {
+			t.Errorf("height %d: last line should be the key legend, got %q", h, last)
+		}
+		if statusLn := lines[len(lines)-2]; !strings.Contains(statusLn, "frame ") {
+			t.Errorf("height %d: second-to-last line should be the status, got %q", h, statusLn)
+		}
+	}
+
+	// WindowSizeMsg re-clamps the scroll (a grown terminal can't leave scroll
+	// pointing past the new end) and requests a clear to wipe stale rows.
+	tall := mm
+	tall.active, tall.scroll = viewRaw, 999
+	sized, cmd := tall.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
+	if s := sized.(tuiModel).scroll; s != sized.(tuiModel).maxScroll() {
+		t.Errorf("resize should re-clamp scroll to maxScroll, got %d/%d", s, sized.(tuiModel).maxScroll())
+	}
+	if cmd == nil {
+		t.Error("resize should return a command (ClearScreen) to wipe stale rows")
+	}
+}
+
 // TestTUIWidthFit: on a narrow terminal every line of the frame fits the width
 // (no soft-wrap), so the pinned tab bar can't be pushed off by a wrapped chrome
 // line — including the long footer key legend and the wide Spark grid.
