@@ -56,6 +56,14 @@ func typeInto(m tea.Model, s string) tea.Model {
 	return m
 }
 
+// doClear performs a confirmed clear on the active tab (c arms the modal, a
+// second c confirms).
+func doClear(m tea.Model) tea.Model {
+	a, _ := m.Update(runes('c'))
+	b, _ := a.Update(runes('c'))
+	return b
+}
+
 // recordableSnapshot is a closed-loop, block-learn-enabled frame (MWAF1=0x82),
 // PROM 24/147, RPM 1600, MAP ~47 kPa, BLM 118 — as a fully processed Snapshot
 // (parsed, flags and codes decoded), the way a Session emits it.
@@ -399,8 +407,7 @@ func TestTUIClearIsolation(t *testing.T) {
 
 	// Clear on the INT tab wipes INT only.
 	mm.active = viewINT
-	next2, _ := mm.Update(runes('c'))
-	mm2 := next2.(tuiModel)
+	mm2 := doClear(mm).(tuiModel)
 	if mm2.intGrid.TotalSamples() != 0 {
 		t.Errorf("INT grid = %d after clear, want 0", mm2.intGrid.TotalSamples())
 	}
@@ -413,8 +420,7 @@ func TestTUIClearIsolation(t *testing.T) {
 
 	// Clear on the sensor tab resets extrema.
 	mm2.active = viewSensors
-	next3, _ := mm2.Update(runes('c'))
-	mm3 := next3.(tuiModel)
+	mm3 := doClear(mm2).(tuiModel)
 	if mm3.hasExtrema || len(mm3.mins) != 0 {
 		t.Error("sensor-tab clear should reset extrema")
 	}
@@ -512,8 +518,7 @@ func TestTUISparkDeltaAccumulation(t *testing.T) {
 
 	// Clear keeps the knock baseline: the next unchanged counter adds nothing.
 	mm.active = viewSpark
-	next, _ := mm.Update(runes('c'))
-	mm2 := next.(tuiModel)
+	mm2 := doClear(mm).(tuiModel)
 	if got := sparkTotal(mm2.sparkGrid); got != 0 {
 		t.Errorf("cleared spark total = %v, want 0", got)
 	}
@@ -646,10 +651,14 @@ func TestTUINoticeExpiry(t *testing.T) {
 		t.Errorf("notice after expiry = %q, want cleared", got)
 	}
 
-	// A newer notice must survive the old warning's stale timer.
-	mm.active = viewBLM
-	next3, _ := mm.Update(runes('c')) // persistent "cleared BLM grid"
-	mm3 := next3.(tuiModel)
+	// A newer notice must survive the old warning's stale timer. A confirmed
+	// clear ([c] twice on a populated grid) leaves a persistent "cleared" notice.
+	fed, _ := mm.Update(snapshotMsg(recordableSnapshot()))
+	fm := fed.(tuiModel)
+	fm.active = viewBLM
+	arm, _ := fm.Update(runes('c'))              // arm the clear confirm
+	done, _ := arm.(tuiModel).Update(runes('c')) // confirm → "cleared BLM grid"
+	mm3 := done.(tuiModel)
 	next4, _ := mm3.Update(noticeExpireMsg(seq)) // stale seq
 	if got := next4.(tuiModel).notice; !strings.Contains(got, "cleared BLM") {
 		t.Errorf("stale expiry wiped a newer notice: %q", got)
@@ -867,8 +876,8 @@ func TestSaveBufferGridSubset(t *testing.T) {
 }
 
 // TestTUIQuitGuard (C.2): q is guarded when a Log is open or grids are unsaved —
-// the first q arms + explains, a second quits; any other key disarms; ctrl+c is
-// always immediate; a clean model quits on the first q.
+// the first q opens the confirm modal, a second quits; any other key cancels;
+// ctrl+c is always immediate; a clean model quits on the first q.
 func TestTUIQuitGuard(t *testing.T) {
 	// Clean model → q quits immediately.
 	if _, cmd := testModel().Update(runes('q')); cmd == nil {
@@ -886,10 +895,10 @@ func TestTUIQuitGuard(t *testing.T) {
 	if cmd1 != nil {
 		t.Error("first q on a dirty model should not quit")
 	}
-	if !m1.quitArmed {
-		t.Error("first q on a dirty model should arm the quit confirm")
+	if m1.confirm != confirmQuit {
+		t.Error("first q on a dirty model should open the quit confirm")
 	}
-	// The confirm is a centered modal, not a footer notice.
+	// The confirm is a centered modal.
 	m1.width, m1.height = 60, 16
 	if v := m1.View(); !strings.Contains(v, "Quit?") || !strings.Contains(v, "unsaved") {
 		t.Errorf("armed view should show the confirm modal, got:\n%s", v)
@@ -898,14 +907,13 @@ func TestTUIQuitGuard(t *testing.T) {
 		t.Error("second q should quit")
 	}
 
-	// A non-q key disarms; the following q re-arms (does not quit).
-	armed := n1.(tuiModel)
-	dis, _ := armed.Update(runes('2'))
-	if dm := dis.(tuiModel); dm.quitArmed {
-		t.Error("a non-q key should disarm the quit guard")
+	// A non-q key cancels the confirm; the following q re-arms (does not quit).
+	dis, _ := m1.Update(runes('2'))
+	if dm := dis.(tuiModel); dm.confirm != confirmNone {
+		t.Error("a non-q key should cancel the quit confirm")
 	}
 	if _, cmd := dis.(tuiModel).Update(runes('q')); cmd != nil {
-		t.Error("q after a disarm should re-arm, not quit")
+		t.Error("q after a cancel should re-arm, not quit")
 	}
 
 	// ctrl+c is immediate even when dirty.
@@ -925,52 +933,55 @@ func TestTUIQuitGuard(t *testing.T) {
 	}
 }
 
-// TestTUIClearUndo (C.3): c clears with an undo hint; u restores the last clear
-// (one slot) and re-dirties; u with nothing warns.
-func TestTUIClearUndo(t *testing.T) {
+// TestTUIClearConfirm (C.3): c opens a confirm modal; a second c clears; any
+// other key cancels; c on an empty/uncleaable tab warns.
+func TestTUIClearConfirm(t *testing.T) {
 	next, _ := testModel().Update(snapshotMsg(recordableSnapshot()))
 	base := next.(tuiModel)
-	base.active = viewBLM
+	base.active, base.width, base.height = viewBLM, 60, 16
 	if base.grid.TotalSamples() == 0 {
 		t.Fatal("BLM should have samples")
 	}
 
-	c1, _ := base.Update(runes('c'))
+	// First c arms the confirm modal (does not clear yet).
+	c1, cmd1 := base.Update(runes('c'))
 	m1 := c1.(tuiModel)
-	if m1.grid.TotalSamples() != 0 {
-		t.Error("c should clear the BLM grid")
+	if m1.confirm != confirmClear {
+		t.Error("c should open the clear confirm")
 	}
-	if !m1.canUndo || !strings.Contains(m1.notice, "undo") {
-		t.Errorf("clear should arm undo + hint, got canUndo=%v notice=%q", m1.canUndo, m1.notice)
+	if cmd1 != nil {
+		t.Error("first c should not act")
 	}
-	u1, _ := m1.Update(runes('u'))
-	m2 := u1.(tuiModel)
-	if m2.grid.TotalSamples() == 0 {
-		t.Error("u should restore the BLM grid")
+	if m1.grid.TotalSamples() == 0 {
+		t.Error("first c must not clear before confirmation")
 	}
-	if m2.canUndo || !m2.dirtyGrids {
-		t.Errorf("undo consumes the slot + re-dirties, got canUndo=%v dirty=%v", m2.canUndo, m2.dirtyGrids)
+	if v := m1.View(); !strings.Contains(v, "Clear BLM grid?") {
+		t.Errorf("armed view should show the clear modal, got:\n%s", v)
 	}
-	// Nothing left to undo → self-expiring warning.
-	u2, cmd := m2.Update(runes('u'))
-	if cmd == nil || !strings.Contains(u2.(tuiModel).notice, "nothing to undo") {
-		t.Errorf("u with nothing should warn, got notice=%q", u2.(tuiModel).notice)
+	// Second c clears.
+	c2, _ := m1.Update(runes('c'))
+	m2 := c2.(tuiModel)
+	if m2.grid.TotalSamples() != 0 || m2.confirm != confirmNone {
+		t.Errorf("second c should clear + close, got samples=%d confirm=%v", m2.grid.TotalSamples(), m2.confirm)
 	}
 
-	// One slot: clearing INT then BLM leaves only BLM undoable.
-	b := next.(tuiModel)
-	b.active = viewINT
-	ci, _ := b.Update(runes('c'))
-	cim := ci.(tuiModel)
-	cim.active = viewBLM
-	cb, _ := cim.Update(runes('c'))
-	uu, _ := cb.(tuiModel).Update(runes('u'))
-	um := uu.(tuiModel)
-	if um.grid.TotalSamples() == 0 {
-		t.Error("u should restore the most-recent clear (BLM)")
+	// A non-c key cancels the confirm without clearing.
+	c3, _ := base.Update(runes('c'))
+	cancel, _ := c3.(tuiModel).Update(runes('2'))
+	cm := cancel.(tuiModel)
+	if cm.confirm != confirmNone || cm.grid.TotalSamples() == 0 {
+		t.Errorf("a non-c key should cancel without clearing, got confirm=%v samples=%d", cm.confirm, cm.grid.TotalSamples())
 	}
-	if um.intGrid.TotalSamples() != 0 {
-		t.Error("INT stays cleared — only one undo slot")
+
+	// c on a tab with nothing to clear → warning, no confirm.
+	empty := testModel()
+	empty.active = viewBLM // no frames → no samples
+	ne, cmd := empty.Update(runes('c'))
+	if nm := ne.(tuiModel); nm.confirm != confirmNone {
+		t.Error("c with nothing to clear should not open a confirm")
+	}
+	if cmd == nil {
+		t.Error("c with nothing to clear should warn (self-expiring)")
 	}
 }
 
@@ -993,8 +1004,9 @@ func TestTUIDirtyTracking(t *testing.T) {
 	cleared := next.(tuiModel)
 	for _, v := range []view{viewBLM, viewINT, viewO2, viewSpark} {
 		cleared.active = v
-		x, _ := cleared.Update(runes('c'))
-		cleared = x.(tuiModel)
+		x, _ := cleared.Update(runes('c'))       // arm the confirm
+		x2, _ := x.(tuiModel).Update(runes('c')) // confirm the clear
+		cleared = x2.(tuiModel)
 	}
 	if cleared.unsaved() {
 		t.Error("cleared grids hold no data → not unsaved")
@@ -1597,8 +1609,7 @@ func TestTUIKnockFreeRunning(t *testing.T) {
 	// Clearing the Spark grid keeps the detection window (a fact about the
 	// counter, not the grid) and the knock baseline.
 	mm.active = viewSpark
-	cleared, _ := mm.Update(runes('c'))
-	cm := cleared.(tuiModel)
+	cm := doClear(mm).(tuiModel)
 	if !cm.knockFreeRunning() {
 		t.Error("clearing the Spark grid must preserve the free-running detection")
 	}
