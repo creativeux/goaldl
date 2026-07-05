@@ -81,6 +81,7 @@ func gridHeat(g *blm.Grid, values [][]float64, ar, ac, minCount, prec int, statu
 		}
 		b.WriteByte('\n')
 	}
+	b.WriteByte('\n') // blank line below the grid, before the legend, to breathe
 	b.WriteString(legend)
 	return b.String()
 }
