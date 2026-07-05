@@ -133,26 +133,33 @@ func TestSparkBody(t *testing.T) {
 	}
 }
 
-// TestSparkBodyFreeRunning: with freeRunning set, the status line carries the
-// warning and the explainer swaps to its free-run head; with it clear, the
-// output is byte-identical to the normal SparkBody (guards the normal path
-// against accidental drift).
+// TestSparkBodyFreeRunning: the free-running warning lives only in the legend/
+// explainer (no duplicate status line above the grid). Collapsed shows the
+// compact warning; expanded swaps to the free-run explainer head; grid values
+// are unchanged; the normal (not free-running) path keeps its usual legend.
 func TestSparkBodyFreeRunning(t *testing.T) {
 	g := blm.NewSpark()
 	g.Add(1600, 40, 2)
 	ev := gridFrame(0x00, 0, 0)
 
-	warned := SparkBody(g, ev, true, true, 0)
-	if !strings.Contains(warned, "free-running counter — not knock") {
-		t.Errorf("free-running SparkBody should warn in the status line:\n%s", warned)
+	// Collapsed + free-running: the compact legend carries the one warning.
+	compact := SparkBody(g, ev, true, false, 0)
+	if !strings.Contains(compact, "counter free-running — cell values are not knock") {
+		t.Errorf("collapsed free-running SparkBody should warn in the legend:\n%s", compact)
 	}
+	// The warning appears exactly once (not duplicated above the grid).
+	if n := strings.Count(compact, "free-running"); n != 1 {
+		t.Errorf("free-running warning should appear once, got %d:\n%s", n, compact)
+	}
+
+	// Expanded + free-running: the explainer head swaps; grid values unchanged.
+	warned := SparkBody(g, ev, true, true, 0)
 	if !strings.Contains(warned, "KNOCK_CNT is free-running") {
-		t.Errorf("free-running SparkBody should swap the explainer head:\n%s", warned)
+		t.Errorf("expanded free-running SparkBody should swap the explainer head:\n%s", warned)
 	}
 	if strings.Contains(warned, "The goal is 0") {
 		t.Errorf("free-running explainer must not keep the 'goal is 0' line:\n%s", warned)
 	}
-	// Grid values unchanged: the cell sum still shows at full brightness.
 	if !strings.Contains(warned, "    2") {
 		t.Errorf("free-running SparkBody must still show the grid values:\n%s", warned)
 	}

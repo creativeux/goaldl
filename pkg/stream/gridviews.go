@@ -221,14 +221,10 @@ func SparkBody(g *blm.Grid, ev FrameEvent, freeRunning, showInfo bool, width int
 	default:
 		legend = sparkLegend
 	}
-	// No status line except the free-running warning — the one piece worth
-	// keeping prominent (the raw KNOCK_CNT/RPM/MAP readout is dropped as the
-	// bottom bar covers loop state and the values here are not knock anyway).
-	status := ""
-	if freeRunning {
-		status = ansiBold + "⚠ free-running counter — not knock" + ansiReset
-	}
-	return gridHeat(g, g.Sum(), ar, ac, 1, 0, status, legend, width)
+	// No status line: like the other grids, loop state is in the bottom bar. The
+	// free-running warning lives only in the legend/explainer (always visible,
+	// bold) rather than being duplicated above the grid.
+	return gridHeat(g, g.Sum(), ar, ac, 1, 0, "", legend, width)
 }
 
 // LoopBadge is the loop-state word: CLOSED LOOP / OPEN LOOP, or "LOOP —" before

@@ -1176,8 +1176,8 @@ func TestTUIKnockFreeRunning(t *testing.T) {
 		t.Error("drive fixture's free-running KNOCK_CNT should be detected")
 	}
 	mm.active = viewSpark
-	if !strings.Contains(mm.View(), "free-running counter — not knock") {
-		t.Error("Spark tab should warn when the counter is free-running")
+	if !strings.Contains(mm.View(), "counter free-running — cell values are not knock") {
+		t.Error("Spark tab should warn (in the legend) when the counter is free-running")
 	}
 
 	// Crafted sparse knock: nonzero delta only every 10th frame → well under the
