@@ -246,16 +246,24 @@ func TestTUIViewPerTab(t *testing.T) {
 	next, _ := m.Update(snapshotMsg(recordableSnapshot()))
 	mm := next.(tuiModel)
 
-	// Header always shows the tab bar and source; footer the heartbeat counts.
+	// Header shows the tab bar and source; the bottom bar shows the loop badge
+	// (in place of the old PROM mark), the heartbeat counts, and the rec dots.
 	v := mm.View()
-	for _, want := range []string{"Sensors", "BLM", "INT", "O2", "Spark", "Flags", "Codes", "Raw", "test", "PROM ✓", "1 ok / 0 bad"} {
+	for _, want := range []string{"Sensors", "BLM", "INT", "O2", "Spark", "Flags", "Codes", "Raw", "test", "1 ok / 0 bad"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("sensors view missing %q", want)
 		}
 	}
-	// The persistent loop-status line shows on every tab (recordable frame → closed).
+	// The loop badge is in the status line and the per-grid recording dots are on
+	// the top row of the bottom bar (recordable frame → closed loop).
 	if !strings.Contains(v, "CLOSED LOOP") {
-		t.Error("view should show the persistent loop-status line")
+		t.Error("footer status line should show the loop badge")
+	}
+	if !strings.Contains(v, "rec: BLM") {
+		t.Error("bottom bar should show the per-grid recording dots")
+	}
+	if strings.Contains(v, "PROM ✓") {
+		t.Error("PROM mark should no longer be in the sensor-tab chrome (replaced by the loop badge)")
 	}
 	if !strings.Contains(v, "Engine speed") {
 		t.Error("sensors view should render the sensor table")
@@ -278,7 +286,7 @@ func TestTUIViewPerTab(t *testing.T) {
 
 	mm.active = viewSpark
 	sv := mm.View()
-	for _, want := range []string{"KNOCK_CNT", "knock events"} {
+	for _, want := range []string{"RPM\\MAP", "knock events"} {
 		if !strings.Contains(sv, want) {
 			t.Errorf("spark view missing %q", want)
 		}
@@ -875,14 +883,17 @@ func TestTUIDriveFixtureEndToEnd(t *testing.T) {
 	}
 }
 
-// TestTUILoopLineHoldsLastGood: the persistent loop line reflects the last
-// parseable frame and does not flicker on a following bad frame.
+// TestTUILoopLineHoldsLastGood: the loop badge (footer status line) reflects the
+// last parseable frame and does not flicker on a following bad frame.
 func TestTUILoopLineHoldsLastGood(t *testing.T) {
 	m := testModel()
 	next, _ := m.Update(snapshotMsg(recordableSnapshot())) // closed loop
 	mm := next.(tuiModel)
-	if !strings.Contains(mm.loopStatusLine(), "CLOSED LOOP") {
-		t.Errorf("loop line = %q, want CLOSED LOOP", mm.loopStatusLine())
+	if !strings.Contains(mm.styledLoopBadge(), "CLOSED LOOP") {
+		t.Errorf("loop badge = %q, want CLOSED LOOP", mm.styledLoopBadge())
+	}
+	if !strings.Contains(mm.recDotsLine(), "rec:") {
+		t.Errorf("rec-dots line = %q, want the per-grid recording dots", mm.recDotsLine())
 	}
 
 	bad := stream.Snapshot{
@@ -891,8 +902,8 @@ func TestTUILoopLineHoldsLastGood(t *testing.T) {
 	}
 	next2, _ := mm.Update(snapshotMsg(bad))
 	mm2 := next2.(tuiModel)
-	if !strings.Contains(mm2.loopStatusLine(), "CLOSED LOOP") {
-		t.Errorf("after bad frame loop line = %q, want held CLOSED LOOP", mm2.loopStatusLine())
+	if !strings.Contains(mm2.styledLoopBadge(), "CLOSED LOOP") {
+		t.Errorf("after bad frame loop badge = %q, want held CLOSED LOOP", mm2.styledLoopBadge())
 	}
 }
 

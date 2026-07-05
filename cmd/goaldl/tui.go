@@ -852,10 +852,13 @@ func (m tuiModel) View() string {
 	}
 	header := lipgloss.JoinHorizontal(lipgloss.Top, rendered...) + "   " + dimStyle.Render(m.source)
 
-	// Footer line 1: live session status (frame / time / PROM / heartbeat /
-	// counts) + recording-and-playback chrome + a transient notice.
+	// Three-row bottom bar. Row 1: per-grid recording state (which grids are
+	// accumulating). Row 2: live session status — frame / time / loop badge (in
+	// place of the old PROM mark) / heartbeat / counts + recording-and-playback
+	// chrome + a transient notice. Row 3: the key legend (or the filename prompt
+	// while open), on its own line so the wide legend can't crowd the status.
 	status := fmt.Sprintf("frame %d   t=%.1fs   %s   %s %d ok / %d bad",
-		m.latest.Index, m.latest.Elapsed.Seconds(), promMark(m.latest.PROMOK),
+		m.latest.Index, m.latest.Elapsed.Seconds(), m.styledLoopBadge(),
 		m.heartbeat(), m.okCount, m.badCount)
 	if m.done {
 		status += "   " + dimStyle.Render("(stream ended)")
@@ -867,20 +870,18 @@ func (m tuiModel) View() string {
 	if m.notice != "" {
 		status += "   " + m.notice
 	}
-	// Footer line 2: the key legend, or the filename prompt while it is open.
-	// Splitting the legend onto its own line keeps the wide legend from crowding
-	// the status (each line is width-truncated independently by fitWidth).
 	keys := dimStyle.Render(m.keyLegend())
 	if m.prompt != nil {
 		keys = m.promptLine()
 	}
-	footer := status + "\n" + keys
+	footer := m.recDotsLine() + "\n" + status + "\n" + keys
 
-	// Pin the tab bar/loop line at the top and the two-line footer at the bottom,
-	// with the body clamped to the height between them. clampBody pads the body
-	// so the whole frame is exactly the terminal height — the footer sits on the
-	// last row every render, so a resize can't leave a frozen copy behind.
-	frame := header + "\n" + m.loopStatusLine() + "\n\n" + m.clampBody(m.activeBody()) + "\n\n" + footer
+	// One blank line under the tab bar lets the table breathe (the loop line that
+	// used to sit here moved into the bottom bar), then the body, then the
+	// three-row footer pinned at the bottom. clampBody pads the body so the whole
+	// frame is exactly the terminal height — the footer sits on the last rows
+	// every render, so a resize can't leave a frozen copy behind.
+	frame := header + "\n\n" + m.clampBody(m.activeBody()) + "\n\n" + footer
 	return m.padHeight(m.fitWidth(frame))
 }
 
@@ -930,16 +931,13 @@ func (m tuiModel) activeBody() string {
 	case m.active == viewSensors:
 		return stream.SensorTableExtrema(m.lastGood.FrameEvent, m.def, m.mins, m.maxs, m.width)
 	case m.active == viewBLM:
-		if m.showInfo {
-			return stream.BLMBodyExplained(m.grid, m.lastGood.FrameEvent, m.minSamples, m.width)
-		}
-		return stream.BLMBody(m.grid, m.lastGood.FrameEvent, m.minSamples, m.width)
+		return stream.BLMBodyDash(m.grid, m.lastGood.FrameEvent, m.minSamples, m.width, m.showInfo)
 	case m.active == viewINT:
-		return stream.INTBody(m.intGrid, m.lastGood.FrameEvent, m.minSamples, m.lastGood.Sensors["integrator"], m.showInfo, m.width)
+		return stream.INTBody(m.intGrid, m.lastGood.FrameEvent, m.minSamples, m.showInfo, m.width)
 	case m.active == viewO2:
-		return stream.O2Body(m.o2Grid, m.lastGood.FrameEvent, m.lastGood.Sensors["oxygen_sensor"]/1000.0, m.showInfo, m.width)
+		return stream.O2Body(m.o2Grid, m.lastGood.FrameEvent, m.showInfo, m.width)
 	case m.active == viewSpark:
-		return stream.SparkBody(m.sparkGrid, m.lastGood.FrameEvent, m.lastGood.Sensors["knock_count"], m.knockFreeRunning(), m.showInfo, m.width)
+		return stream.SparkBody(m.sparkGrid, m.lastGood.FrameEvent, m.knockFreeRunning(), m.showInfo, m.width)
 	case m.active == viewFlags:
 		return stream.FlagsBody(m.lastGood.Flags)
 	case m.active == viewCodes:
@@ -958,9 +956,9 @@ func (m tuiModel) keyLegend() string {
 	return "1-8/tab · " + info + "s save · c clear · r rec · d csv · space/± replay · q quit"
 }
 
-// chromeLines is the fixed non-body height of a frame: the tab bar, the loop
-// line, the blank line above the body, the blank line below it, and the
-// two-line footer (status + key legend).
+// chromeLines is the fixed non-body height of a frame: the tab bar, the blank
+// line above the body, the blank line below it, and the three-line bottom bar
+// (recording state, status, key legend).
 const chromeLines = 6
 
 // bodyBudget is how many lines the body may occupy after the fixed chrome. It is
@@ -1084,23 +1082,31 @@ func (m tuiModel) promptLine() string {
 	return fmt.Sprintf("%s: %s▌  %s", label, p.buf, dimStyle.Render(hint+" · enter confirm · esc cancel"))
 }
 
-// loopStatusLine renders the persistent recording-state line shown on every
-// tab, colouring the loop badge (green closed / amber open / dim unknown) from
-// the latest parseable frame's fuel-trim state.
-func (m tuiModel) loopStatusLine() string {
+// styledLoopBadge is the loop-state word (CLOSED LOOP / OPEN LOOP / LOOP —)
+// coloured from the latest parseable frame — green closed / amber open / dim
+// unknown. It sits in the footer status line in place of the old PROM mark
+// (PROM status is still carried by the heartbeat colour and the Raw tab).
+func (m tuiModel) styledLoopBadge() string {
+	ft := m.lastGood.FuelTrim
+	badge := stream.LoopBadge(ft, m.hasGood)
+	switch {
+	case !m.hasGood:
+		return dimStyle.Render(badge)
+	case ft.ClosedLoop:
+		return loopClosed.Render(badge)
+	default:
+		return loopOpen.Render(badge)
+	}
+}
+
+// recDotsLine is the per-grid recording state (rec: BLM ● INT ● … + a frozen/
+// disabled suffix) — the top row of the bottom bar. It shows which grids are
+// accumulating right now; the loop badge itself lives in the status line below.
+func (m tuiModel) recDotsLine() string {
 	ft := m.lastGood.FuelTrim
 	badge := stream.LoopBadge(ft, m.hasGood)
 	rest := strings.TrimPrefix(stream.LoopStatus(ft, m.hasGood), badge)
-	var style lipgloss.Style
-	switch {
-	case !m.hasGood:
-		style = dimStyle
-	case ft.ClosedLoop:
-		style = loopClosed
-	default:
-		style = loopOpen
-	}
-	return "  " + style.Render(badge) + rest
+	return dimStyle.Render(strings.TrimLeft(rest, " "))
 }
 
 // heartbeat is the per-frame data-quality tick: green ● when the latest frame

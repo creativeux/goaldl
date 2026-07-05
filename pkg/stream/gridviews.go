@@ -45,7 +45,12 @@ func gridHeat(g *blm.Grid, values [][]float64, ar, ac, minCount, prec int, statu
 	}
 
 	var b strings.Builder
-	fmt.Fprintln(&b, status)
+	// The status line is optional: the dashboard suppresses it (the bottom bar
+	// already shows loop state), leaving the grid to breathe; the streaming
+	// monitor passes a live status. Empty ⇒ no line at all (not a blank).
+	if status != "" {
+		fmt.Fprintln(&b, status)
+	}
 	b.WriteString("  RPM\\MAP")
 	for c := 0; c < cols; c++ {
 		fmt.Fprintf(&b, " %4.0f", g.MAP[c])
@@ -157,23 +162,20 @@ const (
 // (block-learn-enable is a BLM-specific gate). intVal is the current frame's
 // integrator, shown live in the status line.
 // showInfo selects the full explainer (true) or the compact one-line legend
-// (false, the dashboard default) — the info accordion toggled by `i`.
-func INTBody(g *blm.Grid, ev FrameEvent, minCount int, intVal float64, showInfo bool, width int) string {
+// (false, the dashboard default) — the info accordion toggled by `i`. The grid
+// has no status line (the bottom bar carries loop state); the active cell is
+// still highlighted in closed loop.
+func INTBody(g *blm.Grid, ev FrameEvent, minCount int, showInfo bool, width int) string {
 	ft := ecm.FuelTrimSample(ev.Frame.Data)
 	ar, ac := -1, -1
-	status := "OPEN LOOP — integrator frozen"
 	if ft.ClosedLoop {
 		ar, ac = g.Cell(ft.RPM, ft.MapKPa)
-		prog := fmt.Sprintf("  cell %.0f/%d",
-			math.Min(float64(g.Samples()[ar][ac]), float64(minCount)), minCount)
-		status = fmt.Sprintf("CLOSED LOOP  RPM %.0f  MAP %.0f kPa  INT %.0f%s",
-			ft.RPM, ft.MapKPa, intVal, prog)
 	}
 	legend := intLegend
 	if showInfo {
 		legend = intExplainer
 	}
-	return gridHeat(g, g.Average(), ar, ac, minCount, 0, status, legend, width)
+	return gridHeat(g, g.Average(), ar, ac, minCount, 0, "", legend, width)
 }
 
 // O2Body renders the oxygen-sensor voltage grid. O2 is ungated (populates every
@@ -182,15 +184,14 @@ func INTBody(g *blm.Grid, ev FrameEvent, minCount int, intVal float64, showInfo 
 // leading-space gutter between columns (a 3-decimal cell fills the whole 5-wide
 // column and columns collide); the current reading and the saved file keep full
 // 3-decimal precision. o2Volts is the current frame's O2 voltage.
-func O2Body(g *blm.Grid, ev FrameEvent, o2Volts float64, showInfo bool, width int) string {
+func O2Body(g *blm.Grid, ev FrameEvent, showInfo bool, width int) string {
 	ft := ecm.FuelTrimSample(ev.Frame.Data)
 	ar, ac := g.Cell(ft.RPM, ft.MapKPa)
-	status := fmt.Sprintf("O2 %.3f V  RPM %.0f  MAP %.0f kPa", o2Volts, ft.RPM, ft.MapKPa)
 	legend := o2Legend
 	if showInfo {
 		legend = o2Explainer
 	}
-	return gridHeat(g, g.Average(), ar, ac, 1, 2, status, legend, width)
+	return gridHeat(g, g.Average(), ar, ac, 1, 2, "", legend, width)
 }
 
 // SparkBody renders the knock-events grid: each cell is the total knocks
@@ -206,10 +207,9 @@ func O2Body(g *blm.Grid, ev FrameEvent, o2Volts float64, showInfo bool, width in
 // the legend/explainer notes it; the grid values are unchanged (shown at full
 // brightness — raw-data policy: annotate, never hide or dim). showInfo picks the
 // full explainer (true) over the compact legend (false, the dashboard default).
-func SparkBody(g *blm.Grid, ev FrameEvent, knockCnt float64, freeRunning, showInfo bool, width int) string {
+func SparkBody(g *blm.Grid, ev FrameEvent, freeRunning, showInfo bool, width int) string {
 	ft := ecm.FuelTrimSample(ev.Frame.Data)
 	ar, ac := g.Cell(ft.RPM, ft.MapKPa)
-	status := fmt.Sprintf("KNOCK_CNT %.0f  RPM %.0f  MAP %.0f kPa", knockCnt, ft.RPM, ft.MapKPa)
 	var legend string
 	switch {
 	case freeRunning && showInfo:
@@ -221,8 +221,12 @@ func SparkBody(g *blm.Grid, ev FrameEvent, knockCnt float64, freeRunning, showIn
 	default:
 		legend = sparkLegend
 	}
+	// No status line except the free-running warning — the one piece worth
+	// keeping prominent (the raw KNOCK_CNT/RPM/MAP readout is dropped as the
+	// bottom bar covers loop state and the values here are not knock anyway).
+	status := ""
 	if freeRunning {
-		status += "  " + ansiBold + "⚠ free-running counter — not knock" + ansiReset
+		status = ansiBold + "⚠ free-running counter — not knock" + ansiReset
 	}
 	return gridHeat(g, g.Sum(), ar, ac, 1, 0, status, legend, width)
 }

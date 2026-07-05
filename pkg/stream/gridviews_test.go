@@ -59,47 +59,40 @@ func TestLoopStatus(t *testing.T) {
 	}
 }
 
-// TestINTBodyGating: a closed-loop frame records and highlights the active
-// cell; an open-loop frame shows the frozen status.
+// TestINTBodyGating: a closed-loop frame highlights the active cell; an
+// open-loop frame does not. The grid carries no status line (loop state is in
+// the dashboard's bottom bar).
 func TestINTBodyGating(t *testing.T) {
 	g := blm.NewDefault()
 	g.Add(1600, 40, 130) // one INT sample in the active cell
 
-	closed := INTBody(g, gridFrame(0x82, 130, 0), 4, 130, false, 0) // MWAF1 bit7+bit1
-	if !strings.Contains(closed, "CLOSED LOOP") || !strings.Contains(closed, "INT 130") {
-		t.Errorf("closed-loop INTBody missing status:\n%s", closed)
-	}
+	closed := INTBody(g, gridFrame(0x82, 130, 0), 4, false, 0) // MWAF1 bit7+bit1
 	if !strings.Contains(closed, "\033[7m") {
 		t.Error("closed-loop INTBody missing active-cell highlight")
 	}
-
-	open := INTBody(g, gridFrame(0x00, 130, 0), 4, 130, false, 0) // MWAF1=0 → open loop
-	if !strings.Contains(open, "integrator frozen") {
-		t.Errorf("open-loop INTBody missing frozen status:\n%s", open)
+	if strings.Contains(closed, "CLOSED LOOP") {
+		t.Errorf("INTBody should no longer render a status line:\n%s", closed)
 	}
+
+	open := INTBody(g, gridFrame(0x00, 130, 0), 4, false, 0) // MWAF1=0 → open loop
 	if strings.Contains(open, "\033[7m") {
 		t.Error("open-loop INTBody should not highlight an active cell")
 	}
 }
 
-// TestO2BodyPrecision: O2 is ungated; the current-reading status keeps full
-// 3-decimal precision, but grid cells render to 2 decimals so columns don't
-// collide (each cell gets a leading-space gutter).
+// TestO2BodyPrecision: O2 grid cells render to 2 decimals so columns don't
+// collide (each cell gets a leading-space gutter). No status line, so the
+// 3-decimal reading no longer appears at all.
 func TestO2BodyPrecision(t *testing.T) {
 	g := blm.NewDefault()
 	g.Add(1600, 40, 0.834)
 
-	out := O2Body(g, gridFrame(0x00, 0, 188), 0.834, false, 0) // open loop, but O2 still shows
-	if !strings.Contains(out, "O2 0.834 V") {
-		t.Errorf("O2Body status missing 3-decimal voltage:\n%s", out)
-	}
-	// 3-decimal precision appears only in the status line; the grid cell rounds
-	// to 2 decimals (" 0.83").
-	if n := strings.Count(out, "0.834"); n != 1 {
-		t.Errorf("O2Body has %d occurrences of 0.834, want 1 (status only — cells are 2-decimal):\n%s", n, out)
-	}
+	out := O2Body(g, gridFrame(0x00, 0, 188), false, 0) // open loop, but O2 still shows
 	if !strings.Contains(out, " 0.83") {
 		t.Errorf("O2Body cell should show the 2-decimal average (0.83):\n%s", out)
+	}
+	if strings.Contains(out, "0.834") {
+		t.Errorf("O2Body should not render the 3-decimal reading (no status line):\n%s", out)
 	}
 	if !strings.Contains(out, "\033[7m") {
 		t.Error("O2Body should highlight the active cell even in open loop (ungated)")
@@ -114,10 +107,7 @@ func TestSparkBody(t *testing.T) {
 	g.Add(1600, 40, 2) // two knock events in one cell: deltas 2 + 3
 	g.Add(1600, 40, 3)
 
-	out := SparkBody(g, gridFrame(0x00, 0, 0), 112, false, true, 0) // open loop; showInfo → explainer landmark
-	if !strings.Contains(out, "KNOCK_CNT 112") {
-		t.Errorf("SparkBody status missing raw counter:\n%s", out)
-	}
+	out := SparkBody(g, gridFrame(0x00, 0, 0), false, true, 0) // showInfo → explainer landmark
 	if !strings.Contains(out, "    5") {
 		t.Errorf("SparkBody cell should show the sum 5 (deltas 2+3), not the mean:\n%s", out)
 	}
@@ -152,7 +142,7 @@ func TestSparkBodyFreeRunning(t *testing.T) {
 	g.Add(1600, 40, 2)
 	ev := gridFrame(0x00, 0, 0)
 
-	warned := SparkBody(g, ev, 112, true, true, 0)
+	warned := SparkBody(g, ev, true, true, 0)
 	if !strings.Contains(warned, "free-running counter — not knock") {
 		t.Errorf("free-running SparkBody should warn in the status line:\n%s", warned)
 	}
@@ -167,7 +157,7 @@ func TestSparkBodyFreeRunning(t *testing.T) {
 		t.Errorf("free-running SparkBody must still show the grid values:\n%s", warned)
 	}
 
-	normal := SparkBody(g, ev, 112, false, true, 0)
+	normal := SparkBody(g, ev, false, true, 0)
 	if strings.Contains(normal, "free-running") {
 		t.Errorf("normal SparkBody must not warn:\n%s", normal)
 	}
@@ -183,16 +173,16 @@ func TestGridExplainers(t *testing.T) {
 	g := blm.NewDefault()
 	ev := gridFrame(0x82, 130, 188)
 
-	if out := BLMBodyExplained(g, ev, 4, 0); !strings.Contains(out, "Block Learn Multiplier") || !strings.Contains(out, "avg/128") {
+	if out := BLMBodyDash(g, ev, 4, 0, true); !strings.Contains(out, "Block Learn Multiplier") || !strings.Contains(out, "avg/128") {
 		t.Errorf("BLMBodyExplained missing the meaning/act lines:\n%s", out)
 	}
 	if out := BLMBody(g, ev, 4, 0); strings.Contains(out, "Block Learn Multiplier") || !strings.Contains(out, "target 128") {
 		t.Errorf("BLMBody (monitor) should keep the compact legend, not the explainer:\n%s", out)
 	}
-	if out := INTBody(g, ev, 4, 130, true, 0); !strings.Contains(out, "Integrator") || !strings.Contains(out, "learned into BLM") {
+	if out := INTBody(g, ev, 4, true, 0); !strings.Contains(out, "Integrator") || !strings.Contains(out, "learned into BLM") {
 		t.Errorf("INTBody (showInfo) missing its explainer:\n%s", out)
 	}
-	if out := O2Body(g, ev, 0.834, true, 0); !strings.Contains(out, "stoichiometric") || !strings.Contains(out, "0.45") {
+	if out := O2Body(g, ev, true, 0); !strings.Contains(out, "stoichiometric") || !strings.Contains(out, "0.45") {
 		t.Errorf("O2Body (showInfo) missing its explainer:\n%s", out)
 	}
 }
@@ -203,18 +193,18 @@ func TestGridLegendAccordion(t *testing.T) {
 	g := blm.NewDefault()
 	ev := gridFrame(0x82, 130, 188)
 
-	if out := INTBody(g, ev, 4, 130, false, 0); strings.Contains(out, "learned into BLM") || !strings.Contains(out, "read sustained cell averages") {
+	if out := INTBody(g, ev, 4, false, 0); strings.Contains(out, "learned into BLM") || !strings.Contains(out, "read sustained cell averages") {
 		t.Errorf("collapsed INTBody should show the compact legend, not the explainer:\n%s", out)
 	}
-	if out := O2Body(g, ev, 0.834, false, 0); strings.Contains(out, "stoichiometric") || !strings.Contains(out, "oscillates in closed loop") {
+	if out := O2Body(g, ev, false, 0); strings.Contains(out, "stoichiometric") || !strings.Contains(out, "oscillates in closed loop") {
 		t.Errorf("collapsed O2Body should show the compact legend, not the explainer:\n%s", out)
 	}
-	if out := SparkBody(g, ev, 9, false, false, 0); strings.Contains(out, "false knock") || !strings.Contains(out, "goal is 0 everywhere") {
+	if out := SparkBody(g, ev, false, false, 0); strings.Contains(out, "false knock") || !strings.Contains(out, "goal is 0 everywhere") {
 		t.Errorf("collapsed SparkBody should show the compact legend, not the explainer:\n%s", out)
 	}
 	// A collapsed, free-running Spark tab still carries the warning (in both the
 	// status line and the compact legend), even without the full explainer.
-	if out := SparkBody(g, ev, 9, true, false, 0); !strings.Contains(out, "free-running") || strings.Contains(out, "working ESC") {
+	if out := SparkBody(g, ev, true, false, 0); !strings.Contains(out, "free-running") || strings.Contains(out, "working ESC") {
 		t.Errorf("collapsed free-running SparkBody should warn without the explainer:\n%s", out)
 	}
 }
@@ -225,12 +215,12 @@ func TestGridWidthTruncation(t *testing.T) {
 	g := blm.NewSpark() // 15 MAP columns → 84 cols wide
 	g.Add(1600, 40, 5)
 
-	full := SparkBody(g, gridFrame(0x00, 0, 0), 9, false, false, 0)
+	full := SparkBody(g, gridFrame(0x00, 0, 0), false, false, 0)
 	if !strings.Contains(full, "  95  100") || strings.Contains(full, "›") {
 		t.Errorf("width 0 should render every MAP column, no cue:\n%s", full)
 	}
 
-	narrow := SparkBody(g, gridFrame(0x00, 0, 0), 9, false, false, 50)
+	narrow := SparkBody(g, gridFrame(0x00, 0, 0), false, false, 50)
 	if !strings.Contains(narrow, "›") {
 		t.Errorf("a narrow grid should show the › truncation cue:\n%s", narrow)
 	}
@@ -250,7 +240,7 @@ func TestGridWidthTruncation(t *testing.T) {
 	// Sub-usably-narrow (no room for even one 5-wide column): gridHeat emits the
 	// RPM label + › only, never a partial data digit. Because gridHeat keeps its
 	// own lines ≤ width, the caller's ANSI catch-all never has to cut a cell.
-	tiny := SparkBody(g, gridFrame(0x00, 0, 0), 9, false, false, 13)
+	tiny := SparkBody(g, gridFrame(0x00, 0, 0), false, false, 13)
 	for _, ln := range strings.Split(tiny, "\n") {
 		if strings.HasPrefix(ln, "  RPM") || strings.HasPrefix(ln, "   ") {
 			if w := ansi.StringWidth(ln); w > 13 {

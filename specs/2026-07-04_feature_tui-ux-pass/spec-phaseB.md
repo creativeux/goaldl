@@ -16,17 +16,25 @@ This corrects the empirical assumption in the heuristic analysis (F4 originally 
 ### Design
 `View()` renders a frame of **exactly the terminal height**, with the tab bar/loop line pinned at the top and a two-line footer pinned at the bottom.
 
-- **Fixed chrome = 6 lines**: tab bar, loop-status line, the blank line above the body, the blank line below it, and the **two-line footer** (status line + key-legend line — split 2026-07-04, see below). `chromeLines` const.
+- **Fixed chrome = 6 lines**: tab bar, the blank line above the body, the blank line below it, and a **three-row bottom bar** (recording state · status · key legend — see below). `chromeLines` const.
 - `bodyBudget() = height − chromeLines` (min 1); unbounded before the first `WindowSizeMsg` (`height == 0`) so the initial frame renders in full.
 - `activeBody()` extracts the per-tab content switch (was inline in `View`).
 - `clampBody(body)` fits the body to **exactly** `bodyBudget` lines: if it fits, **pad with blank lines**; if it overflows, show a scroll window of `budget − 1` lines from `m.scroll` + a reserved status line `↑/↓ j/k scroll · lines A–B of N`. Either way the body region is exactly the budget, so `chrome + body == height` and the footer is on the last row every render.
 - `padHeight()` is a final safety net that pads/clamps the whole frame (and the variable-height error panel) to exactly `m.height`.
 - **Scroll state** `m.scroll`: `j`/`down` increment, `k`/`up` decrement via `clampScroll` (→ `[0, maxScroll]`). Switching tabs and toggling the accordion re-home `scroll` to 0; **`WindowSizeMsg` re-clamps** it (a grown terminal can't leave the offset past the new end).
 
-### Two-line footer + resize ghosting (2026-07-04, user report)
-The user hit two problems on resize: the one-line footer was too wide, and resizing larger/smaller left a **frozen duplicate footer** (an old render's footer stranded on a screen row the new, differently-sized frame no longer wrote). Both are fixed by rendering a constant full-height frame:
-- **Footer split into two lines**: line 1 = live status (`frame/t/PROM/heartbeat/counts`) + recording/playback chrome + notice; line 2 = the key legend (or the filename prompt while open). Each line is width-truncated independently by `fitWidth`, so the wide legend no longer crowds or truncates the status.
-- **Constant height + clear**: `clampBody`/`padHeight` make every frame exactly `m.height` lines (footer always on the last row), and `Update` returns `tea.ClearScreen` on `WindowSizeMsg` to wipe any stale rows the terminal kept from the old size. Together these guarantee every screen row is rewritten each render — no floating or frozen footer.
+### Three-row bottom bar + resize ghosting (2026-07-04, user reports)
+Three rounds of user feedback reshaped the chrome:
+- **Resize ghosting + wide footer**: the one-line footer overflowed, and resizing left a **frozen duplicate footer** (an old render's footer stranded on a row the new, differently-sized frame no longer wrote). Fixed by a constant full-height frame: `clampBody`/`padHeight` make every frame exactly `m.height` lines (footer always on the last rows), and `Update` returns `tea.ClearScreen` on `WindowSizeMsg` (also re-clamps `m.scroll`) to wipe stale rows — every screen row is rewritten each render.
+- **Chrome reorg** (2nd report): the loop-status line moved off the top into the bottom bar, and the footer PROM mark was replaced by the loop badge.
+- **Declutter** (3rd report): the per-grid **status line was removed** from the grid tabs (BLM/INT/O2/Spark) — the "CLOSED LOOP RPM… MAP… BLM… cell n/n" readout was overwhelming and duplicative of the bottom bar. A **blank line above the table** was added on every tab to let it breathe. The one status bit kept is the Spark **free-running warning** (Phase A trust) — it stays as the only grid status line, shown when the counter free-runs.
+
+Final layout:
+- **Top**: tab bar (+ source), a blank line, then the body.
+- **Bottom bar, 3 rows**: (1) `recDotsLine()` — per-grid recording state `rec: BLM ● INT ● O2 ● SPARK ●` + frozen/disabled suffix (moved from the top); (2) status — `frame/t/`**`loop badge`**`/heartbeat/counts` + REC/CSV/speed chrome + notice (the coloured CLOSED/OPEN LOOP badge replaces the old `PROM ✓`; PROM status still reads from the heartbeat colour and the Raw tab); (3) key legend, or the filename prompt while open.
+- Each row is width-truncated independently by `fitWidth`; `loopStatusLine()` split into `styledLoopBadge()` (status) + `recDotsLine()` (bottom row).
+
+**Grid-status removal mechanics**: `gridHeat` now skips the status line when it is empty (was: always printed). The dashboard grid builders pass `""` (INTBody/O2Body drop their now-unused current-value params; SparkBody passes the free-running warning or `""`). BLM splits into `BLMBody` (streaming `monitor -blm`, `showStatus=true` — it has no bottom bar, so keeps the live loop/RPM/MAP/BLM readout) and `BLMBodyDash` (dashboard, `showStatus=false`, compact legend or explainer per `showInfo`); `blmBody` gains a `showStatus` param, `BLMBodyExplained` is folded into `BLMBodyDash`. The monitor path is unchanged.
 
 ### Keys added
 `i` (accordion), `j`/`down` (scroll down), `k`/`up` (scroll up). These were free — `left`/`right`/`h`/`l`/`tab` remain tab navigation; `j`/`k` follow vim down/up, consistent with `h`/`l`.
@@ -36,7 +44,7 @@ On an 80×12 terminal driven over the drive fixture, the Raw tab (tallest body) 
 
 ### Edge cases
 - **height 0** (pre-size): no clamp/pad, full render — the model gets a `WindowSizeMsg` immediately on program start, so this is a single transient frame.
-- **height < 7**: `bodyBudget` floors at 1 so the frame wants 7 lines; `padHeight` clamps to `m.height`, which can cut the footer — accepted degenerate case (a sub-7-row terminal can't show tabs+loop+2-line-footer+1 body line).
+- **height < 7**: `bodyBudget` floors at 1 so the frame wants 7 lines; `padHeight` clamps to `m.height`, which can cut the bottom bar — accepted degenerate case (a sub-7-row terminal can't show tabs + blank + 3-row bottom bar + 1 body line).
 - **narrow width**: addressed in B.2 (`fitWidth` truncates each line, so a wrapped chrome line can't throw off the height math).
 
 ## B.4 — Info accordion
