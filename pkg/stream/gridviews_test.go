@@ -271,16 +271,16 @@ func TestSensorTableColumnDrop(t *testing.T) {
 	}
 
 	// Narrow enough to force ALT out but keep RAW.
-	mid := SensorTableExtrema(ev, def, mins, maxs, 60)
+	mid := SensorTableExtrema(ev, def, mins, maxs, 66)
 	if strings.Contains(mid, "ALT") {
 		t.Errorf("ALT should drop first under width pressure:\n%s", mid)
 	}
-	if !strings.Contains(mid, "SENSOR") || !strings.Contains(mid, "VALUE") || !strings.Contains(mid, "MIN") {
-		t.Errorf("core columns must survive:\n%s", mid)
+	if !strings.Contains(mid, "SENSOR") || !strings.Contains(mid, "VALUE") || !strings.Contains(mid, "RAW") {
+		t.Errorf("SENSOR/VALUE/RAW must survive the first drop:\n%s", mid)
 	}
 
 	// Very narrow: RAW drops too.
-	tight := SensorTableExtrema(ev, def, mins, maxs, 40)
+	tight := SensorTableExtrema(ev, def, mins, maxs, 52)
 	if strings.Contains(tight, "RAW") {
 		t.Errorf("RAW should drop second under tighter width:\n%s", tight)
 	}
@@ -289,8 +289,8 @@ func TestSensorTableColumnDrop(t *testing.T) {
 	}
 }
 
-// TestSensorTableExtrema: the 6-column table shows MIN/MAX; nil extrema falls
-// back to the 4-column table.
+// TestSensorTableExtrema: the dashboard table shows SENSOR/RAW/VALUE/ALT (MIN
+// and MAX are hidden for now); nil extrema falls back to the plain SensorTable.
 func TestSensorTableExtrema(t *testing.T) {
 	frame := []byte{0x04, 0x18, 0x93, 0x75, 0x53, 0x00, 0x5B, 0x43, 0x36, 0x80, 0x69, 0x00, 0x00, 0x00, 0x00, 0x87, 0x80, 0x70, 0x7D, 0xC8}
 	registry := ecm.NewRegistry()
@@ -300,17 +300,17 @@ func TestSensorTableExtrema(t *testing.T) {
 	mins := map[string]float64{"engine_rpm": 550, "battery_voltage": 12.1}
 	maxs := map[string]float64{"engine_rpm": 3700, "battery_voltage": 14.6}
 	out := SensorTableExtrema(ev, def, mins, maxs, 0)
-	for _, want := range []string{"MIN", "MAX", "550", "3700", "12.10", "14.60"} {
+	for _, want := range []string{"SENSOR", "RAW", "VALUE", "ALT"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("SensorTableExtrema missing %q:\n%s", want, out)
 		}
 	}
-
-	// nil extrema → 4-column fallback (no MIN/MAX headers).
-	fallback := SensorTableExtrema(ev, def, nil, nil, 0)
-	if strings.Contains(fallback, "MIN") || strings.Contains(fallback, "MAX") {
-		t.Errorf("nil extrema should render the 4-column table:\n%s", fallback)
+	if strings.Contains(out, "MIN") || strings.Contains(out, "MAX") {
+		t.Errorf("MIN/MAX columns should be hidden for now:\n%s", out)
 	}
+
+	// nil extrema → the plain SensorTable fallback (unchanged monitor path).
+	fallback := SensorTableExtrema(ev, def, nil, nil, 0)
 	if fallback != SensorTable(ev, def) {
 		t.Error("nil extrema should equal SensorTable output")
 	}

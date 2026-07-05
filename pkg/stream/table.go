@@ -192,11 +192,13 @@ func SensorTable(ev FrameEvent, def *ecm.Definition) string {
 	return renderTable(rowsFor(ev, def))
 }
 
-// SensorTableExtrema renders the dashboard table (SENSOR·RAW·VALUE·MIN·MAX·ALT),
-// with per-sensor extrema from mins/maxs. When mins is nil it falls back to the
-// 4-column SensorTable, so the monitor path is unchanged. width, when > 0, drops
-// the lowest-value columns (ALT, then RAW) so the core SENSOR/VALUE/MIN/MAX stay
-// readable on a narrow terminal instead of wrapping.
+// SensorTableExtrema renders the dashboard sensor table (SENSOR·RAW·VALUE·ALT).
+// When mins is nil it falls back to the plain 4-column SensorTable, so the
+// monitor path is unchanged. width, when > 0, drops the lower-value columns
+// (ALT, then RAW) so SENSOR/VALUE stay readable on a narrow terminal instead of
+// wrapping. mins/maxs are still accepted (and BuildRowsExtrema still records
+// them) so the MIN/MAX columns can be re-added later by restoring them to the
+// column set below; they are currently hidden to keep focus on VALUE/ALT.
 func SensorTableExtrema(ev FrameEvent, def *ecm.Definition, mins, maxs map[string]float64, width int) string {
 	if mins == nil {
 		return SensorTable(ev, def)
@@ -210,7 +212,9 @@ func SensorTableExtrema(ev FrameEvent, def *ecm.Definition, mins, maxs map[strin
 
 // renderTableExtrema formats rows into the aligned dashboard table (no trailing
 // newline on the last line). Columns are dropped in order — ALT first, then RAW
-// — while the table is wider than width (width<=0 keeps all columns).
+// — while the table is wider than width (width<=0 keeps all columns). (MIN/MAX
+// are intentionally omitted for now; add {"MIN", …}/{"MAX", …} back to keep and
+// extend the drop order to re-enable them.)
 func renderTableExtrema(rows []Row, width int) string {
 	cols := []struct {
 		header string
@@ -220,8 +224,6 @@ func renderTableExtrema(rows []Row, width int) string {
 		{"SENSOR", func(r Row) string { return r.Sensor }, 0},
 		{"RAW", func(r Row) string { return r.Raw }, 0},
 		{"VALUE", func(r Row) string { return r.Value }, 0},
-		{"MIN", func(r Row) string { return r.Min }, 0},
-		{"MAX", func(r Row) string { return r.Max }, 0},
 		{"ALT", func(r Row) string { return r.Alt }, 0},
 	}
 	for i := range cols {
@@ -248,7 +250,7 @@ func renderTableExtrema(rows []Row, width int) string {
 		}
 		return total
 	}
-	for _, drop := range []int{5, 1} { // ALT first, then RAW
+	for _, drop := range []int{3, 1} { // ALT (idx 3) first, then RAW (idx 1)
 		if width <= 0 || tableW() <= width {
 			break
 		}

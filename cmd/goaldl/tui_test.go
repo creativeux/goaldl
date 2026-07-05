@@ -268,10 +268,10 @@ func TestTUIViewPerTab(t *testing.T) {
 	if !strings.Contains(v, "Engine speed") {
 		t.Error("sensors view should render the sensor table")
 	}
-	// Sensor tab now carries MIN/MAX columns (always-on).
-	for _, want := range []string{"MIN", "MAX"} {
-		if !strings.Contains(v, want) {
-			t.Errorf("sensors view missing %q column", want)
+	// MIN/MAX columns are hidden for now (focus on VALUE/ALT).
+	for _, gone := range []string{"MIN", "MAX"} {
+		if strings.Contains(v, gone) {
+			t.Errorf("sensors view should not render the %q column (hidden for now)", gone)
 		}
 	}
 	// Dual-unit Alt column: MAP byte 99 → (99+28.06)/2.71 ≈ 46.89 kPa.

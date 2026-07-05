@@ -490,6 +490,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.now = time.Time(msg)
+		if m.done {
+			return m, nil // stream ended — stop the idle staleness timer
+		}
 		return m, m.tick()
 
 	case noticeExpireMsg:

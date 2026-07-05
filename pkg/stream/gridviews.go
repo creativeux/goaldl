@@ -60,7 +60,9 @@ func gridHeat(g *blm.Grid, values [][]float64, ar, ac, minCount, prec int, statu
 	}
 	b.WriteByte('\n')
 	for r, rpm := range g.RPM {
-		fmt.Fprintf(&b, "  %5.0f ", rpm)
+		// 9-col row label to match the "  RPM\MAP" header width (labelW), so the
+		// MAP column values line up under their headers.
+		fmt.Fprintf(&b, "  %5.0f  ", rpm)
 		for c := 0; c < cols; c++ {
 			var cellText string
 			switch {
