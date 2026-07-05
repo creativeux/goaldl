@@ -173,6 +173,7 @@ func cmdTUI(args []string) {
 		intGrid:    blm.NewDefault(),
 		o2Grid:     blm.NewDefault(),
 		sparkGrid:  blm.NewSpark(),
+		buf:        newFrameBuf(),
 		mins:       map[string]float64{},
 		maxs:       map[string]float64{},
 	}
@@ -218,23 +219,79 @@ const (
 	viewCount
 )
 
-// promptTarget names which file-producing action an open filename prompt will
-// perform on confirm.
-type promptTarget int
+// outputOp is which of the two output operations a picker will perform:
+// Save Buffer (retroactive dump of the frame ring) or Log (forward streaming).
+type outputOp int
 
 const (
-	promptSave promptTarget = iota
-	promptRecord
-	promptCSV
+	opSaveBuffer outputOp = iota
+	opLog
 )
 
-// promptState is the modal filename editor opened by `s`, `r`, and `d`: buf is
-// the editable base name (extensions/suffixes are appended by the action);
-// hint is a transient message (e.g. name collision) shown until the next edit.
-type promptState struct {
-	target promptTarget
-	buf    string
+// fmtItem is one checkbox in an output picker: a stable id, a display label,
+// whether it is currently selected, and whether it is disabled in the current
+// context (shown dimmed with a note, not hidden — e.g. RAW on a replay source).
+type fmtItem struct {
+	id       string // "csv", "blm", "int", "o2", "spark", "raw"
+	label    string
+	on       bool
+	disabled bool
+	note     string // why it's disabled (shown dimmed beside the label)
+}
+
+// outputPicker is the modal opened by `s` (Save Buffer) and `r` (Log): a format
+// checklist plus editable destination-directory and base-name fields, confirmed
+// once. cursor indexes the items, then the dir field, then the name field. hint
+// is a transient message (e.g. a name collision) shown until the next edit.
+type outputPicker struct {
+	op     outputOp
+	items  []fmtItem
+	cursor int
+	dir    string
+	name   string
 	hint   string
+}
+
+// dirRow and nameRow are the cursor positions of the two editable path fields,
+// just past the last checklist item (dir first, then name).
+func (p *outputPicker) dirRow() int  { return len(p.items) }
+func (p *outputPicker) nameRow() int { return len(p.items) + 1 }
+
+// selected returns the ids of the checked, enabled items.
+func (p *outputPicker) selected() []string {
+	var out []string
+	for _, it := range p.items {
+		if it.on && !it.disabled {
+			out = append(out, it.id)
+		}
+	}
+	return out
+}
+
+// outputRecord is one written file, kept for the exit summary (Phase C.4) and
+// the confirmation notice: the path and a human detail (rows / cells / bytes).
+type outputRecord struct {
+	name   string
+	detail string
+}
+
+// gridSel pairs a grid's checklist id/suffix with its file writer, so Save
+// Buffer can write any selected subset (delivering single-grid save, F18).
+type gridSel struct {
+	id     string
+	suffix string
+	write  func(io.Writer)
+}
+
+// allGridSels builds the writer for each of the four grids; the picker filters
+// this by the selected ids.
+func allGridSels(blmG, intG, o2G, sparkG *blm.Grid, minSamples int) []gridSel {
+	return []gridSel{
+		{"blm", "BLM", func(w io.Writer) { writeTrimGridFile(w, blmG, "BLM", minSamples) }},
+		{"int", "INT", func(w io.Writer) { writeTrimGridFile(w, intG, "INT", minSamples) }},
+		{"o2", "O2", func(w io.Writer) { writeO2File(w, o2G) }},
+		{"spark", "SPARK", func(w io.Writer) { writeSparkFile(w, sparkG) }},
+	}
 }
 
 // rawHistoryCap bounds the raw-frame ring; more than the widest terminal can
@@ -303,13 +360,18 @@ type tuiModel struct {
 	hasKnockBase  bool               // first parsed frame only sets the baseline
 	mins, maxs    map[string]float64 // per-sensor extrema since last reset
 	hasExtrema    bool
-	notice        string       // transient footer message after a save/clear
-	noticeSeq     int          // bumped on every notice change; guards expiry timers
-	prompt        *promptState // modal filename editor (nil when inactive)
-	recFile       *os.File     // open raw-capture target (nil when not recording)
+	notice        string         // transient footer message after a save/clear
+	noticeSeq     int            // bumped on every notice change; guards expiry timers
+	picker        *outputPicker  // modal output checklist (nil when inactive)
+	buf           *frameBuf      // always-on decoded-frame ring for Save Buffer
+	written       []outputRecord // files written this session (exit summary)
+	recFile       *os.File       // open raw-capture target (nil when not logging raw)
 	recName       string
-	csvLog        *frameCSV // open CSV log (nil when not logging)
+	csvLog        *frameCSV // open CSV log (nil when not logging CSV)
 	csvName       string
+	logBase       string        // base path for the active Log's grid snapshot (at stop)
+	logGridIDs    []string      // grids selected for the active Log, written when it stops
+	logStartAt    time.Duration // frame-timeline position when the active Log started (for the REC clock)
 	frameCount    int
 	done          bool
 	fatalErr      error // session's terminal error (nil = clean end / user quit)
@@ -327,6 +389,14 @@ type tuiModel struct {
 	knockWindowHead  int // next write position (ring)
 	knockWindowCount int // frames seen, capped at knockWindowSize
 	knockNonzero     int // count of true entries currently in the window
+
+	// heartbeat health: a sliding window over recent frames tracks how many
+	// failed to parse, so the heartbeat colour reflects *current* stream quality
+	// rather than a cumulative ratio a rough start would drag down forever.
+	healthWindow [healthWindowSize]bool // parseOK per recent frame
+	healthHead   int
+	healthCount  int // frames in the window, capped at healthWindowSize
+	healthBad    int // count of !parseOK entries currently in the window
 
 	// layout: showInfo expands the grid explainer accordion (`i`); scroll is the
 	// vertical offset into a body taller than the terminal (`j`/`k`/↑/↓), so a
@@ -373,12 +443,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.ClearScreen
 
 	case tea.KeyMsg:
-		// An open filename prompt captures every key (digits, q, … type into
-		// the buffer); only ctrl+c still quits. The mutating call is sequenced
-		// into its own statement so m is copied for the return *after* it runs
-		// (a call inside `return m, …` is unordered relative to reading m).
-		if m.prompt != nil {
-			cmd := m.handlePromptKey(msg)
+		// An open output picker captures every key (digits, q, … edit the name;
+		// space toggles a box); only ctrl+c still quits. The mutating call is
+		// sequenced into its own statement so m is copied for the return *after*
+		// it runs (a call inside `return m, …` is unordered relative to reading m).
+		if m.picker != nil {
+			cmd := m.handlePickerKey(msg)
 			return m, cmd
 		}
 		prevActive := m.active
@@ -402,28 +472,26 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.active = viewCodes
 		case "8":
 			m.active = viewRaw
-		case "tab", "right", "l":
+		case "tab", "right":
 			m.active = (m.active + 1) % viewCount
-		case "shift+tab", "left", "h":
+		case "shift+tab", "left":
 			m.active = (m.active + viewCount - 1) % viewCount
 		case "i":
 			// Toggle the grid explainer accordion; height changes, so re-home the
 			// scroll. A no-op on non-grid tabs (they render no explainer).
 			m.showInfo = !m.showInfo
 			m.scroll = 0
-		case "j", "down":
+		case "down":
 			m.scroll = m.clampScroll(m.scroll + 1)
-		case "k", "up":
+		case "up":
 			m.scroll = m.clampScroll(m.scroll - 1)
 		case "s":
-			m.prompt = &promptState{target: promptSave, buf: defaultBase()}
+			m.openSaveBuffer()
 		case "c":
 			m.setNotice(m.clear())
-		case "r":
-			cmd := m.toggleRecording() // sequence the mutation before reading m
+		case "l":
+			cmd := m.toggleLog() // sequence the mutation before reading m
 			return m, cmd
-		case "d":
-			m.toggleCSV()
 		case " ":
 			if cmd := m.replayGuard(); cmd != nil {
 				return m, cmd
@@ -463,7 +531,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.badCount++
 		}
+		m.pushHealth(s.ParseOK)
 		m.accumulate(s)
+		m.buf.push(m.bufFrame(s, frame))
 		if m.csvLog != nil && s.ParseOK {
 			// ParseOK rows only — parity with `monitor -csv`, which writes a
 			// row only when the frame parses.
@@ -476,6 +546,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.recFile.Close()
 				m.recFile, m.recName = nil, ""
 				m.setNotice("recording stopped: " + err.Error())
+			}
+		}
+		if len(m.logGridIDs) > 0 {
+			// Rewrite the aggregate tables every frame so the last complete
+			// version survives a crash. Fail-soft: a write error detaches grid
+			// logging and notices, but never kills the session.
+			if err := m.rewriteLogGrids(); err != nil {
+				m.logGridIDs, m.logBase = nil, ""
+				m.setNotice("log grids stopped: " + err.Error())
 			}
 		}
 		return m, m.waitForSnapshot()
@@ -588,128 +667,390 @@ func (m *tuiModel) clear() string {
 	return m.notice
 }
 
-// defaultBase is the pre-filled filename prompt value shared by save, record,
-// and CSV: a timestamped goaldl_<ts> the operator can accept with one Enter.
+// defaultBase is the pre-filled base-name for the output picker: a timestamped
+// goaldl_<ts> the operator can accept with one Enter.
 func defaultBase() string { return "goaldl_" + time.Now().Format("20060102_150405") }
 
-// handlePromptKey routes keys while the filename prompt is open: printable
-// runes (digits, q, spaces, path separators) edit the buffer; enter confirms,
-// esc cancels, and only ctrl+c still quits the program.
-func (m *tuiModel) handlePromptKey(msg tea.KeyMsg) tea.Cmd {
-	p := m.prompt
+// currentDir is the pre-filled destination directory for the output picker —
+// the working directory, editable in the picker so files can land elsewhere.
+func currentDir() string {
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return "."
+}
+
+// chopRune drops the last rune of s (backspace in the picker's text fields).
+func chopRune(s string) string {
+	if r := []rune(s); len(r) > 0 {
+		return string(r[:len(r)-1])
+	}
+	return s
+}
+
+// contains reports whether id is in the selected-format list.
+func contains(sel []string, id string) bool {
+	for _, s := range sel {
+		if s == id {
+			return true
+		}
+	}
+	return false
+}
+
+// bufFrame projects a snapshot into the compact record the ring retains. It
+// reuses the caller's already-copied frame bytes and builds a fresh values slice
+// in def.Parameters order, so the live Sensors map is not kept alive.
+func (m tuiModel) bufFrame(s stream.Snapshot, frame []byte) bufFrame {
+	bf := bufFrame{
+		data:       frame,
+		elapsedSec: s.Elapsed.Seconds(),
+		byteOffset: s.Frame.ByteOffset,
+		parseOK:    s.ParseOK,
+		promOK:     s.PROMOK,
+	}
+	if s.ParseOK {
+		vals := make([]float64, len(m.def.Parameters))
+		for i, p := range m.def.Parameters {
+			vals[i] = s.Sensors[p.Name]
+		}
+		bf.vals = vals
+	}
+	return bf
+}
+
+// gridItems is the four fuel-trim/spark grid checkboxes, shared by the Save
+// Buffer and Log pickers (all default on).
+func gridItems() []fmtItem {
+	return []fmtItem{
+		{id: "blm", label: "BLM grid", on: true},
+		{id: "int", label: "INT grid", on: true},
+		{id: "o2", label: "O2 grid", on: true},
+		{id: "spark", label: "SPARK grid", on: true},
+	}
+}
+
+// openSaveBuffer opens the Save Buffer picker: a decoded-only checklist (no RAW,
+// which cannot be reconstructed from decoded frames) over the frame ring and the
+// four grids. All boxes default on; the common case is Enter twice.
+func (m *tuiModel) openSaveBuffer() {
+	items := append([]fmtItem{{id: "csv", label: "Sensor CSV", on: true}}, gridItems()...)
+	m.picker = &outputPicker{op: opSaveBuffer, items: items, dir: currentDir(), name: defaultBase()}
+}
+
+// logActive reports whether a Log session is running: a streaming output (raw
+// or CSV) is open, or grids are pending a stop-time snapshot.
+func (m tuiModel) logActive() bool {
+	return m.recFile != nil || m.csvLog != nil || len(m.logGridIDs) > 0
+}
+
+// toggleLog stops an open Log, or opens the Log picker. A Log streams RAW/CSV
+// forward and snapshots any selected grids when it stops. The Log picker offers
+// the same outputs as Save Buffer plus RAW; RAW needs a live serial stream, so
+// on a replay source it is shown disabled (not hidden) and defaults off.
+func (m *tuiModel) toggleLog() tea.Cmd {
+	if m.logActive() {
+		m.stopLog()
+		return nil
+	}
+	// Forward logging is live-only; on a replay the ring covers export via [s].
+	if m.replay != nil {
+		return m.warn("logging is live-only — use [s] save to export")
+	}
+	raw := fmtItem{id: "raw", label: "RAW bytes"}
+	if m.recSink == nil {
+		raw.disabled, raw.note = true, "live only"
+	}
+	items := append([]fmtItem{raw, {id: "csv", label: "Sensor CSV", on: true}}, gridItems()...)
+	m.picker = &outputPicker{op: opLog, items: items, dir: currentDir(), name: defaultBase()}
+	return nil
+}
+
+// stopLog closes any open Log streams, writes the snapshot of any grids the Log
+// selected, records everything for the exit summary, and reports what was written.
+func (m *tuiModel) stopLog() {
+	var parts []string
+	if m.recFile != nil {
+		_, n := m.recSink.Set(nil)
+		m.recFile.Close()
+		detail := humanBytes(n)
+		m.written = append(m.written, outputRecord{m.recName, detail})
+		parts = append(parts, fmt.Sprintf("%s (%s)", m.recName, detail))
+		m.recFile, m.recName = nil, ""
+	}
+	if m.csvLog != nil {
+		rows := m.csvLog.Rows
+		m.csvLog.Close()
+		m.written = append(m.written, outputRecord{m.csvName, fmt.Sprintf("%d rows", rows)})
+		parts = append(parts, fmt.Sprintf("%s (%d rows)", m.csvName, rows))
+		m.csvLog, m.csvName = nil, ""
+	}
+	if len(m.logGridIDs) > 0 {
+		base, ids := m.logBase, m.logGridIDs
+		err := m.rewriteLogGrids() // final flush to capture the last frame
+		m.logGridIDs, m.logBase = nil, ""
+		if err != nil {
+			parts = append(parts, "grids failed ("+err.Error()+")")
+		} else {
+			for _, g := range logGridSels(m, ids) {
+				m.written = append(m.written, outputRecord{base + "_" + g.suffix + ".txt", "grid"})
+			}
+			parts = append(parts, fmt.Sprintf("%d grid(s)", len(ids)))
+		}
+	}
+	if len(parts) > 0 {
+		m.setNotice("stopped log: " + strings.Join(parts, ", "))
+	}
+}
+
+// logGridSels returns the gridSel writers for the grid ids the active Log
+// selected, reading the current grid pointers (so a mid-log clear is honoured).
+func logGridSels(m *tuiModel, ids []string) []gridSel {
+	var sels []gridSel
+	for _, g := range allGridSels(m.grid, m.intGrid, m.o2Grid, m.sparkGrid, m.minSamples) {
+		if contains(ids, g.id) {
+			sels = append(sels, g)
+		}
+	}
+	return sels
+}
+
+// rewriteLogGrids rewrites every grid file the active Log selected with the
+// grids' current accumulated state — called on every frame so the last complete
+// tables survive a crash. Each file is written atomically (temp + rename), so a
+// crash mid-write leaves the previous complete version intact, never a torn one.
+// A no-op when no grids are pending.
+func (m *tuiModel) rewriteLogGrids() error {
+	for _, g := range logGridSels(m, m.logGridIDs) {
+		if err := atomicWriteFile(m.logBase+"_"+g.suffix+".txt", g.write); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// atomicWriteFile writes via a sibling temp file, fsyncs it, and renames it over
+// path — so a reader (or a crash) never sees a partially-written file.
+func atomicWriteFile(path string, write func(io.Writer)) error {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	write(f)
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// handlePickerKey routes keys while the output picker is open: ↑/↓ move the
+// cursor across the checkboxes and the name field, space toggles the box under
+// the cursor, printable runes edit the name (only on the name row), enter
+// confirms, esc cancels, and only ctrl+c still quits the program.
+func (m *tuiModel) handlePickerKey(msg tea.KeyMsg) tea.Cmd {
+	p := m.picker
 	switch msg.Type {
 	case tea.KeyCtrlC:
 		m.cancel()
 		return tea.Quit
 	case tea.KeyEscape:
-		m.prompt = nil
+		m.picker = nil
 		m.setNotice("cancelled")
 	case tea.KeyEnter:
-		m.confirmPrompt()
-	case tea.KeyBackspace:
-		if r := []rune(p.buf); len(r) > 0 {
-			p.buf = string(r[:len(r)-1])
+		m.confirmPicker()
+	case tea.KeyUp:
+		if p.cursor > 0 {
+			p.cursor--
 		}
-		p.hint = ""
+	case tea.KeyDown:
+		if p.cursor < p.nameRow() {
+			p.cursor++
+		}
 	case tea.KeySpace:
-		p.buf += " "
-		p.hint = ""
+		if p.cursor < len(p.items) {
+			if it := &p.items[p.cursor]; it.disabled {
+				p.hint = it.label + " — " + it.note
+			} else {
+				it.on = !it.on
+				p.hint = ""
+			}
+		}
+	case tea.KeyBackspace:
+		switch p.cursor {
+		case p.dirRow():
+			p.dir = chopRune(p.dir)
+			p.hint = ""
+		case p.nameRow():
+			p.name = chopRune(p.name)
+			p.hint = ""
+		}
 	case tea.KeyRunes:
-		p.buf += string(msg.Runes)
-		p.hint = ""
+		switch p.cursor {
+		case p.dirRow():
+			p.dir += string(msg.Runes)
+			p.hint = ""
+		case p.nameRow():
+			p.name += string(msg.Runes)
+			p.hint = ""
+		}
 	}
 	return nil
 }
 
-// confirmPrompt performs the prompted action with the edited base name. A name
-// collision keeps the prompt open (hint set) so the operator can edit and
-// retry — files are never silently overwritten.
-func (m *tuiModel) confirmPrompt() {
-	p := m.prompt
-	base := strings.TrimSpace(p.buf)
-	if base == "" {
-		m.prompt = nil
+// confirmPicker dispatches the picker's Enter: an empty name cancels, an empty
+// selection keeps the picker open with a hint, otherwise the op-specific writer
+// runs (a name collision also keeps the picker open — files are never
+// overwritten).
+func (m *tuiModel) confirmPicker() {
+	p := m.picker
+	name := strings.TrimSpace(p.name)
+	if name == "" {
+		m.picker = nil
 		m.setNotice("cancelled")
 		return
 	}
-	switch p.target {
-	case promptSave:
-		// dir "" so the base is used verbatim: bare names land in the working
-		// directory, and a typed path (absolute or relative) is honoured.
-		if err := saveGrids("", base, m.grid, m.intGrid, m.o2Grid, m.sparkGrid, m.minSamples); err != nil {
+	// Join the editable directory and name; an empty dir leaves the name verbatim
+	// (working directory). A path typed into either field is still honoured.
+	base := filepath.Join(strings.TrimSpace(p.dir), name)
+	sel := p.selected()
+	if len(sel) == 0 {
+		p.hint = "nothing selected"
+		return
+	}
+	switch p.op {
+	case opSaveBuffer:
+		m.confirmSaveBuffer(base, sel)
+	case opLog:
+		m.confirmLog(base, sel)
+	}
+}
+
+// confirmSaveBuffer writes the selected grids and/or a Sensor CSV dumped from
+// the frame ring, under the base name (dir "" so a bare name lands in the
+// working directory and a typed path is honoured). Every target is pre-checked
+// for existence before anything is written, so a collision aborts cleanly with
+// the picker still open and no partial set on disk.
+func (m *tuiModel) confirmSaveBuffer(base string, sel []string) {
+	var grids []gridSel
+	for _, g := range allGridSels(m.grid, m.intGrid, m.o2Grid, m.sparkGrid, m.minSamples) {
+		if contains(sel, g.id) {
+			grids = append(grids, g)
+		}
+	}
+	csvName := base + ".csv"
+	var targets []string
+	for _, g := range grids {
+		targets = append(targets, base+"_"+g.suffix+".txt")
+	}
+	if contains(sel, "csv") {
+		targets = append(targets, csvName)
+	}
+	for _, t := range targets {
+		if _, err := os.Stat(t); err == nil {
+			m.picker.hint = "exists — edit the name"
+			return
+		}
+	}
+	if len(grids) > 0 {
+		if err := saveGrids("", base, grids); err != nil {
 			if errors.Is(err, fs.ErrExist) {
-				p.hint = "exists — edit the name"
+				m.picker.hint = "exists — edit the name"
 				return
 			}
-			m.prompt = nil
+			m.picker = nil
 			m.setNotice("save failed: " + err.Error())
 			return
 		}
-		m.prompt = nil
-		m.setNotice("saved BLM/INT/O2/SPARK → " + base + "_*.txt")
-	case promptRecord:
-		name := base + ".raw"
-		f, err := os.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-		if err != nil {
-			if errors.Is(err, fs.ErrExist) {
-				p.hint = "exists — edit the name"
-				return
-			}
-			m.prompt = nil
-			m.setNotice("record failed: " + err.Error())
-			return
+		for _, g := range grids {
+			m.written = append(m.written, outputRecord{base + "_" + g.suffix + ".txt", ""})
 		}
-		m.recSink.Set(f)
-		m.recFile, m.recName = f, name
-		m.prompt = nil
-		m.setNotice("recording → " + name)
-	case promptCSV:
-		name := base + ".csv"
-		if _, err := os.Stat(name); err == nil {
-			p.hint = "exists — edit the name"
-			return
-		}
-		c, err := newFrameCSV(name, m.def)
+	}
+	if contains(sel, "csv") {
+		c, err := newFrameCSV(csvName, m.def)
 		if err != nil {
-			m.prompt = nil
+			m.picker = nil
 			m.setNotice("csv failed: " + err.Error())
 			return
 		}
-		m.csvLog, m.csvName = c, name
-		m.prompt = nil
-		m.setNotice("csv log → " + name)
+		for _, f := range m.buf.frames() {
+			c.WriteRow(f)
+		}
+		rows := c.Rows
+		c.Close()
+		m.written = append(m.written, outputRecord{csvName, fmt.Sprintf("%d rows", rows)})
 	}
+	m.picker = nil
+	m.setNotice(fmt.Sprintf("saved %d file(s) (%s)", len(targets), base))
 }
 
-// toggleRecording starts (via the filename prompt) or stops the live raw
-// capture. Replay sources have nothing to record — the capture file already
-// exists — so `r` warns with a self-expiring notice.
-func (m *tuiModel) toggleRecording() tea.Cmd {
-	switch {
-	case m.recSink == nil:
-		return m.warn("recording needs a live source (-p)")
-	case m.recFile != nil:
-		_, n := m.recSink.Set(nil)
-		m.recFile.Close()
-		m.setNotice(fmt.Sprintf("stopped recording %s (%s)", m.recName, humanBytes(n)))
-		m.recFile, m.recName = nil, ""
-	default:
-		m.prompt = &promptState{target: promptRecord, buf: defaultBase()}
+// confirmLog opens forward-streaming writers (RAW/CSV) for the selected formats
+// under the base name, and remembers any selected grids to snapshot when the Log
+// stops (grids are session aggregates, not a stream). Every target — including
+// the deferred grid files — is pre-checked so a collision keeps the picker open.
+func (m *tuiModel) confirmLog(base string, sel []string) {
+	rawName, csvName := base+".raw", base+".csv"
+	var gridIDs []string
+	var targets []string
+	if contains(sel, "raw") {
+		targets = append(targets, rawName)
 	}
-	return nil
-}
-
-// toggleCSV starts (via the filename prompt) or stops the decoded-frame CSV
-// log. Works on live and replay sources alike.
-func (m *tuiModel) toggleCSV() {
-	if m.csvLog != nil {
-		rows := m.csvLog.Rows
-		m.csvLog.Close()
-		m.setNotice(fmt.Sprintf("stopped csv %s (%d rows)", m.csvName, rows))
-		m.csvLog, m.csvName = nil, ""
-		return
+	if contains(sel, "csv") {
+		targets = append(targets, csvName)
 	}
-	m.prompt = &promptState{target: promptCSV, buf: defaultBase()}
+	for _, g := range allGridSels(m.grid, m.intGrid, m.o2Grid, m.sparkGrid, m.minSamples) {
+		if contains(sel, g.id) {
+			gridIDs = append(gridIDs, g.id)
+			targets = append(targets, base+"_"+g.suffix+".txt")
+		}
+	}
+	for _, t := range targets {
+		if _, err := os.Stat(t); err == nil {
+			m.picker.hint = "exists — edit the name"
+			return
+		}
+	}
+	var parts []string
+	if contains(sel, "raw") {
+		f, err := os.OpenFile(rawName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err != nil {
+			m.picker = nil
+			m.setNotice("log raw failed: " + err.Error())
+			return
+		}
+		m.recSink.Set(f)
+		m.recFile, m.recName = f, rawName
+		parts = append(parts, rawName)
+	}
+	if contains(sel, "csv") {
+		c, err := newFrameCSV(csvName, m.def)
+		if err != nil {
+			m.picker = nil
+			m.setNotice("log csv failed: " + err.Error())
+			return
+		}
+		m.csvLog, m.csvName = c, csvName
+		parts = append(parts, csvName)
+	}
+	m.logBase, m.logGridIDs = base, gridIDs
+	m.logStartAt = m.latest.Elapsed // anchor the REC clock
+	if len(gridIDs) > 0 {
+		// Write the tables once now (and on every frame after) so the latest
+		// complete version is always on disk — crash-proof.
+		if err := m.rewriteLogGrids(); err != nil {
+			m.logGridIDs, m.logBase = nil, ""
+			m.picker = nil
+			m.setNotice("log grids failed: " + err.Error())
+			return
+		}
+		parts = append(parts, fmt.Sprintf("%d grid(s) (live)", len(gridIDs)))
+	}
+	m.picker = nil
+	m.setNotice("logging → " + strings.Join(parts, ", "))
 }
 
 // replayGuard returns a non-nil self-expiring warning command when the
@@ -733,7 +1074,7 @@ func (m *tuiModel) adjustSpeed(factor float64) tea.Cmd {
 	v := m.replay.CurrentSpeed() * factor
 	v = math.Max(0.25, math.Min(16, v))
 	m.replay.SetSpeed(v)
-	m.setNotice(fmt.Sprintf("speed %g×", v))
+	// No notice — the legend's [±] speed (N×) reflects the change live.
 	return nil
 }
 
@@ -748,6 +1089,10 @@ func (m tuiModel) closeOutputs() {
 	if m.csvLog != nil {
 		m.csvLog.Close()
 	}
+	// Final flush of the active Log's grids so a clean quit captures the last
+	// frame (errors are unreportable post-teardown; the previous per-frame write
+	// is already durable on disk).
+	m.rewriteLogGrids()
 }
 
 // humanBytes formats a byte count for the footer's recording segment.
@@ -762,21 +1107,13 @@ func humanBytes(n int64) string {
 	}
 }
 
-// saveGrids writes the BLM, INT, O2, and spark grids to four files in dir
-// sharing the caller-chosen base name (`<base>_BLM.txt`, …). Files are created
-// exclusively; every target is checked up front so a name collision aborts
-// cleanly (overwriting nothing), and a mid-write failure unlinks the files
-// already created this call — either way no partial set is left behind.
-func saveGrids(dir, base string, blmG, intG, o2G, sparkG *blm.Grid, minSamples int) error {
-	files := []struct {
-		suffix string
-		write  func(io.Writer)
-	}{
-		{"BLM", func(w io.Writer) { writeTrimGridFile(w, blmG, "BLM", minSamples) }},
-		{"INT", func(w io.Writer) { writeTrimGridFile(w, intG, "INT", minSamples) }},
-		{"O2", func(w io.Writer) { writeO2File(w, o2G) }},
-		{"SPARK", func(w io.Writer) { writeSparkFile(w, sparkG) }},
-	}
+// saveGrids writes the selected grids to files in dir sharing the caller-chosen
+// base name (`<base>_BLM.txt`, …). Files are created exclusively; every target
+// is checked up front so a name collision aborts cleanly (overwriting nothing),
+// and a mid-write failure unlinks the files already created this call — either
+// way no partial set is left behind. The caller passes only the grids it wants
+// (see allGridSels), delivering single-grid save.
+func saveGrids(dir, base string, files []gridSel) error {
 	for _, fl := range files {
 		if _, err := os.Stat(filepath.Join(dir, base+"_"+fl.suffix+".txt")); err == nil {
 			return fmt.Errorf("%s_%s.txt: %w", base, fl.suffix, fs.ErrExist)
@@ -834,35 +1171,29 @@ var (
 	tabActive   = lipgloss.NewStyle().Bold(true).Reverse(true).Padding(0, 1)
 	tabInactive = lipgloss.NewStyle().Faint(true).Padding(0, 1)
 	dimStyle    = lipgloss.NewStyle().Faint(true)
+	offStyle    = lipgloss.NewStyle().Faint(true).Strikethrough(true)            // a disabled key hint
 	beatOK      = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))            // green
+	beatWarn    = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))            // amber
 	beatBad     = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))            // red
 	loopClosed  = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true) // green
 	loopOpen    = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true) // amber
+	brandStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")) // GoALDL logo (cyan; not reverse, so it doesn't read as a tab)
 )
 
 func (m tuiModel) View() string {
 	if m.fatalErr != nil {
 		return m.padHeight(m.fitWidth(m.errorPanel()))
 	}
-	tabs := []string{"1 Sensors", "2 BLM", "3 INT", "4 O2", "5 Spark", "6 Flags", "7 Codes", "8 Raw"}
-	rendered := make([]string, len(tabs))
-	for i, t := range tabs {
-		if view(i) == m.active {
-			rendered[i] = tabActive.Render(t)
-		} else {
-			rendered[i] = tabInactive.Render(t)
-		}
-	}
-	header := lipgloss.JoinHorizontal(lipgloss.Top, rendered...) + "   " + dimStyle.Render(m.source)
-
-	// Three-row bottom bar. Row 1: per-grid recording state (which grids are
-	// accumulating). Row 2: live session status — frame / time / loop badge (in
-	// place of the old PROM mark) / heartbeat / counts + recording-and-playback
-	// chrome + a transient notice. Row 3: the key legend (or the filename prompt
-	// while open), on its own line so the wide legend can't crowd the status.
-	status := fmt.Sprintf("frame %d   t=%.1fs   %s   %s %d ok / %d bad",
-		m.latest.Index, m.latest.Elapsed.Seconds(), m.styledLoopBadge(),
-		m.heartbeat(), m.okCount, m.badCount)
+	// Grid tabs carry a per-grid accumulation dot (● accumulating / ○ frozen by
+	// loop gating), so which grids are learning reads straight off the tab bar —
+	// no separate rec-dots row. BLM needs closed-loop + block-learn enable, INT
+	// needs closed-loop, O2/Spark are always live once a good frame arrives.
+	// Title bar: the GoALDL brand + a compact session status — the signal dot
+	// (connection + parse-quality colour), the buffer fill, and (only while a Log
+	// is running) the REC clock, then any transient notice. Loop state and the
+	// elapsed clock are intentionally omitted (loop state still reads off the tab
+	// dots). The mode badge isn't here: live is unbadged; replay's leads its row.
+	status := dimStyle.Render("Signal:") + " " + m.signalDot()
 	if m.done {
 		status += "   " + dimStyle.Render("(stream ended)")
 	}
@@ -873,17 +1204,56 @@ func (m tuiModel) View() string {
 	if m.notice != "" {
 		status += "   " + m.notice
 	}
-	keys := dimStyle.Render(m.keyLegend())
-	if m.prompt != nil {
-		keys = m.promptLine()
+	// Title bar: GoALDL flush left, the status block flush right.
+	brand := brandStyle.Render("GoALDL")
+	gap := 3
+	if w := m.contentWidth(); w > 0 {
+		if g := w - ansi.StringWidth(brand) - ansi.StringWidth(status); g > gap {
+			gap = g
+		}
 	}
-	footer := m.recDotsLine() + "\n" + status + "\n" + keys
+	titleBar := brand + strings.Repeat(" ", gap) + status
 
-	// One blank line under the tab bar lets the table breathe (the loop line that
-	// used to sit here moved into the bottom bar), then the body, then the
-	// three-row footer pinned at the bottom. clampBody pads the body so the whole
-	// frame is exactly the terminal height — the footer sits on the last rows
-	// every render, so a resize can't leave a frozen copy behind.
+	// Grid tabs carry a per-grid accumulation dot (● accumulating / ○ frozen by
+	// loop gating), so which grids are learning reads straight off the tab bar.
+	// BLM needs closed-loop + block-learn enable, INT needs closed-loop, O2/Spark
+	// are always live once a good frame arrives.
+	tabs := []string{"1 Sensors", "2 BLM", "3 INT", "4 O2", "5 Spark", "6 Flags", "7 Codes", "8 Raw"}
+	rendered := make([]string, len(tabs))
+	for i, t := range tabs {
+		t += m.tabDot(view(i))
+		if view(i) == m.active {
+			rendered[i] = tabActive.Render(t)
+		} else {
+			rendered[i] = tabInactive.Render(t)
+		}
+	}
+	// Blank line between the title bar and the tabs, so the brand reads as a
+	// header rather than a tab.
+	header := titleBar + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, rendered...)
+
+	keys := m.keyLegend() // already per-segment styled
+	if m.picker != nil {
+		keys = dimStyle.Render("[↑↓] move · [space] toggle · type edits dir/name · [enter] confirm · [esc] cancel")
+	}
+	// Bottom bar: (replay only) a playback-nav row, then the live legend. The
+	// playback row is blank while the picker is open (the picker owns [space]) so
+	// the frame height stays fixed per mode — matches chromeHeight.
+	var footerRows []string
+	if m.replay != nil {
+		nav := ""
+		if m.picker == nil {
+			nav = m.replayNav()
+		}
+		footerRows = append(footerRows, nav)
+	}
+	footerRows = append(footerRows, keys)
+	footer := strings.Join(footerRows, "\n")
+
+	// Title bar + tabs pinned top; one blank line lets the body breathe; the body;
+	// a blank line; the footer pinned bottom. clampBody pads the body so the whole
+	// frame is exactly the terminal height — the footer sits on the last rows every
+	// render, so a resize can't leave a frozen copy behind.
 	frame := header + "\n\n" + m.clampBody(m.activeBody()) + "\n\n" + footer
 	return m.padHeight(m.fitWidth(frame))
 }
@@ -910,12 +1280,13 @@ func (m tuiModel) padHeight(s string) string {
 // truncate at column boundaries; this is the catch-all for the styled chrome and
 // prose bodies. No-op before the first WindowSizeMsg (width 0).
 func (m tuiModel) fitWidth(s string) string {
-	if m.width <= 0 {
+	w := m.contentWidth()
+	if w <= 0 {
 		return s
 	}
 	lines := strings.Split(s, "\n")
 	for i, ln := range lines {
-		lines[i] = ansi.Truncate(ln, m.width, "›")
+		lines[i] = ansi.Truncate(ln, w, "›")
 	}
 	return strings.Join(lines, "\n")
 }
@@ -925,6 +1296,8 @@ func (m tuiModel) fitWidth(s string) string {
 // warning verdict.
 func (m tuiModel) activeBody() string {
 	switch {
+	case m.picker != nil:
+		return m.pickerView()
 	case !m.hasFrame:
 		return dimStyle.Render("\n  waiting for frames…")
 	case m.active == viewRaw:
@@ -932,15 +1305,15 @@ func (m tuiModel) activeBody() string {
 	case !m.hasGood:
 		return dimStyle.Render("\n  waiting for a parseable frame… (see 8 Raw for the byte stream)")
 	case m.active == viewSensors:
-		return stream.SensorTableExtrema(m.lastGood.FrameEvent, m.def, m.mins, m.maxs, m.width)
+		return stream.SensorTableExtrema(m.lastGood.FrameEvent, m.def, m.mins, m.maxs, m.contentWidth())
 	case m.active == viewBLM:
-		return stream.BLMBodyDash(m.grid, m.lastGood.FrameEvent, m.minSamples, m.width, m.showInfo)
+		return stream.BLMBodyDash(m.grid, m.lastGood.FrameEvent, m.minSamples, m.contentWidth(), m.showInfo)
 	case m.active == viewINT:
-		return stream.INTBody(m.intGrid, m.lastGood.FrameEvent, m.minSamples, m.showInfo, m.width)
+		return stream.INTBody(m.intGrid, m.lastGood.FrameEvent, m.minSamples, m.showInfo, m.contentWidth())
 	case m.active == viewO2:
-		return stream.O2Body(m.o2Grid, m.lastGood.FrameEvent, m.showInfo, m.width)
+		return stream.O2Body(m.o2Grid, m.lastGood.FrameEvent, m.showInfo, m.contentWidth())
 	case m.active == viewSpark:
-		return stream.SparkBody(m.sparkGrid, m.lastGood.FrameEvent, m.knockFreeRunning(), m.showInfo, m.width)
+		return stream.SparkBody(m.sparkGrid, m.lastGood.FrameEvent, m.knockFreeRunning(), m.showInfo, m.contentWidth())
 	case m.active == viewFlags:
 		return stream.FlagsBody(m.lastGood.Flags)
 	case m.active == viewCodes:
@@ -949,20 +1322,119 @@ func (m tuiModel) activeBody() string {
 	return ""
 }
 
-// keyLegend is the footer's key hint, context-trimmed: `i info` only appears on
-// the grid tabs, which are the only ones with an explainer to toggle.
+// keyLegend is the always-present live key hint — the primary chrome, shown in
+// both modes. Live-only keys that don't apply in replay ([l] log) render struck
+// through (disabled; invoking them warns); [c] is labelled by what it clears and
+// hidden where it's a no-op; [i] info only appears on grid tabs. The replay
+// playback keys are a separate row added below only in replay (see replayNav).
 func (m tuiModel) keyLegend() string {
-	info := ""
-	if isGridTab(m.active) {
-		info = "i info · "
+	type seg struct {
+		text string
+		on   bool
 	}
-	return "1-8/tab · " + info + "s save · c clear · r rec · d csv · space/± replay · q quit"
+	segs := []seg{{"[s] save", true}}
+	if c := m.clearLabel(); c != "" {
+		segs = append(segs, seg{c, true})
+	}
+	if isGridTab(m.active) {
+		segs = append(segs, seg{"[i] info", true})
+	}
+	logText := "[l] log"
+	if m.logActive() {
+		logText = "[l] stop log"
+	}
+	segs = append(segs, seg{logText, m.replay == nil}) // live-only: disabled on replay
+	segs = append(segs, seg{"[q] quit", true})
+
+	parts := make([]string, len(segs))
+	for i, s := range segs {
+		if s.on {
+			parts[i] = dimStyle.Render(s.text)
+		} else {
+			parts[i] = offStyle.Render(s.text)
+		}
+	}
+	return strings.Join(parts, dimStyle.Render(" · "))
 }
 
-// chromeLines is the fixed non-body height of a frame: the tab bar, the blank
-// line above the body, the blank line below it, and the three-line bottom bar
-// (recording state, status, key legend).
-const chromeLines = 6
+// replayNav is the extra playback-control row shown only in replay mode, below
+// the live legend — replay is a rare advanced/debug mode, so its keys are added
+// rather than displacing the live chrome.
+func (m tuiModel) replayNav() string {
+	return dimStyle.Render("(Replay)  [space] pause · " + m.speedLabel())
+}
+
+// formatElapsed renders a stream position as m:ss (or h:mm:ss past an hour).
+func formatElapsed(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	total := int(d.Seconds())
+	h, m, s := total/3600, (total%3600)/60, total%60
+	if h > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
+	}
+	return fmt.Sprintf("%d:%02d", m, s)
+}
+
+// clearLabel names what [c] clears on the active tab (the grid, or the sensor
+// min/max), or "" where clear is a no-op (flags/codes/raw) so [c] is hidden.
+func (m tuiModel) clearLabel() string {
+	switch m.active {
+	case viewBLM:
+		return "[c] clear BLM"
+	case viewINT:
+		return "[c] clear INT"
+	case viewO2:
+		return "[c] clear O2"
+	case viewSpark:
+		return "[c] clear SPARK"
+	case viewSensors:
+		return "[c] reset min/max"
+	}
+	return ""
+}
+
+// speedLabel is the replay playback-speed hint carrying the current speed; 0
+// (an unpaced -speed 0 replay) reads as (max).
+func (m tuiModel) speedLabel() string {
+	if sp := m.replay.CurrentSpeed(); sp == 0 {
+		return "[±] speed (max)"
+	}
+	return fmt.Sprintf("[±] speed (%g×)", m.replay.CurrentSpeed())
+}
+
+// maxContentWidth caps how wide the frame renders, so on a wide terminal the
+// content (and the right-justified status) stays in a readable column near the
+// left rather than stretching edge to edge. Sized to the widest body — the spark
+// grid (WinALDL's 15 MAP columns), which renders ~84 cols but needs 86 for its
+// column-fit logic to show every column without its › truncation cue. Everything
+// else (tabs, tables, legends) is narrower, so nothing truncates.
+const maxContentWidth = 86
+
+// contentWidth is the effective render width — the terminal width, capped at
+// maxContentWidth. 0 before the first WindowSizeMsg (unbounded, as the builders
+// expect), so the initial frame renders in full.
+func (m tuiModel) contentWidth() int {
+	switch {
+	case m.width <= 0:
+		return 0
+	case m.width < maxContentWidth:
+		return m.width
+	default:
+		return maxContentWidth
+	}
+}
+
+// chromeHeight is the non-body height of a frame: the title bar, a blank, the
+// tab bar, a blank above the body, a blank below it, and the bottom bar (key
+// legend = 1 row live; replay adds a playback-nav row = 2).
+func (m tuiModel) chromeHeight() int {
+	if m.replay != nil {
+		return 7
+	}
+	return 6
+}
 
 // bodyBudget is how many lines the body may occupy after the fixed chrome. It is
 // unbounded before the first WindowSizeMsg (m.height 0), so the initial frame
@@ -971,7 +1443,7 @@ func (m tuiModel) bodyBudget() int {
 	if m.height <= 0 {
 		return 1 << 30
 	}
-	if b := m.height - chromeLines; b > 1 {
+	if b := m.height - m.chromeHeight(); b > 1 {
 		return b
 	}
 	return 1
@@ -1035,7 +1507,7 @@ func (m tuiModel) clampBody(body string) string {
 		s = 0
 	}
 	shown := strings.Join(lines[s:s+win], "\n")
-	status := dimStyle.Render(fmt.Sprintf("  ↑/↓ j/k scroll · lines %d–%d of %d", s+1, s+win, len(lines)))
+	status := dimStyle.Render(fmt.Sprintf("  [↑/↓] scroll · lines %d–%d of %d", s+1, s+win, len(lines)))
 	return shown + "\n" + status
 }
 
@@ -1045,50 +1517,69 @@ func isGridTab(v view) bool {
 	return v == viewBLM || v == viewINT || v == viewO2 || v == viewSpark
 }
 
-// sessionChrome renders the persistent recording/logging/playback segments of
-// the footer: a red ● REC while raw capture runs, the CSV row count while
-// logging, and the replay pause/speed state.
+// sessionChrome renders the buffer/logging/playback segments of the status: the
+// frame-buffer fill %, a red ● REC clock while a Log is running (the recording
+// time — data-timeline duration since it started), and the replay pause state.
 func (m tuiModel) sessionChrome() string {
-	var out string
-	if m.recFile != nil {
-		out += "   " + beatBad.Render(fmt.Sprintf("● REC %s %s", m.recName, humanBytes(m.recSink.Bytes())))
+	out := "   " + dimStyle.Render(fmt.Sprintf("buf %d%%", m.buf.fillPct()))
+	if m.logActive() {
+		out += "   " + beatBad.Render("● REC "+formatElapsed(m.latest.Elapsed-m.logStartAt))
 	}
-	if m.csvLog != nil {
-		out += "   " + dimStyle.Render(fmt.Sprintf("CSV %s %d", m.csvName, m.csvLog.Rows))
-	}
-	if m.replay != nil {
-		switch sp := m.replay.CurrentSpeed(); {
-		case m.replay.Paused():
-			out += "   " + loopOpen.Render("⏸ PAUSED")
-		case sp != 1 && sp != 0:
-			out += "   " + dimStyle.Render(fmt.Sprintf("%g×", sp))
-		}
+	// Paused is a prominent state, so it stays in the status row; the running
+	// speed is a control setting and rides next to its key in the legend instead.
+	if m.replay != nil && m.replay.Paused() {
+		out += "   " + loopOpen.Render("⏸ PAUSED")
 	}
 	return out
 }
 
-// promptLine renders the open filename prompt with its target-specific
-// extension hint (or a transient hint such as a name collision).
-func (m tuiModel) promptLine() string {
-	p := m.prompt
-	label, ext := "save as", "+ _BLM/_INT/_O2/_SPARK.txt"
-	switch p.target {
-	case promptRecord:
-		label, ext = "record to", "+ .raw"
-	case promptCSV:
-		label, ext = "csv to", "+ .csv"
+// pickerView renders the open output picker as the body: a format checklist
+// with a cursor marker, the editable name field, the resolved destination
+// directory (F17), and any transient hint (e.g. a name collision).
+func (m tuiModel) pickerView() string {
+	p := m.picker
+	title := "Save Buffer — pick outputs (from the frame buffer)"
+	if p.op == opLog {
+		title = "Log — pick outputs (streams to disk from now on)"
 	}
-	hint := ext
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n  %s\n\n", title)
+	for i, it := range p.items {
+		box := "[ ]"
+		if it.on {
+			box = "[x]"
+		}
+		cur := "  "
+		if p.cursor == i {
+			cur = "▸ "
+		}
+		if it.disabled {
+			// Dimmed with the reason — visible but not selectable.
+			fmt.Fprintf(&b, "%s\n", dimStyle.Render(fmt.Sprintf("  %s%s %s (%s)", cur, box, it.label, it.note)))
+			continue
+		}
+		fmt.Fprintf(&b, "  %s%s %s\n", cur, box, it.label)
+	}
+	// Two editable path fields; the caret ▌ marks whichever the cursor is on.
+	field := func(row int, label, val string) string {
+		cur, caret := "  ", ""
+		if p.cursor == row {
+			cur, caret = "▸ ", "▌"
+		}
+		return fmt.Sprintf("  %s%s %s%s\n", cur, label, val, caret)
+	}
+	b.WriteString("\n" + field(p.dirRow(), "dir: ", p.dir))
+	b.WriteString(field(p.nameRow(), "name:", p.name))
 	if p.hint != "" {
-		hint = p.hint
+		fmt.Fprintf(&b, "\n  %s\n", beatBad.Render(p.hint))
 	}
-	return fmt.Sprintf("%s: %s▌  %s", label, p.buf, dimStyle.Render(hint+" · enter confirm · esc cancel"))
+	return b.String()
 }
 
-// styledLoopBadge is the loop-state word (CLOSED LOOP / OPEN LOOP / LOOP —)
-// coloured from the latest parseable frame — green closed / amber open / dim
-// unknown. It sits in the footer status line in place of the old PROM mark
-// (PROM status is still carried by the heartbeat colour and the Raw tab).
+// styledLoopBadge is the loop-state word (CLOSED LOOP / OPEN LOOP / LOOP —) with
+// a leading state circle — filled ● for closed loop, hollow ○ for open loop —
+// coloured from the latest parseable frame (green closed / amber open / dim
+// unknown). It leads the footer status line.
 func (m tuiModel) styledLoopBadge() string {
 	ft := m.lastGood.FuelTrim
 	badge := stream.LoopBadge(ft, m.hasGood)
@@ -1096,34 +1587,104 @@ func (m tuiModel) styledLoopBadge() string {
 	case !m.hasGood:
 		return dimStyle.Render(badge)
 	case ft.ClosedLoop:
-		return loopClosed.Render(badge)
+		return loopClosed.Render("● " + badge)
 	default:
-		return loopOpen.Render(badge)
+		return loopOpen.Render("○ " + badge)
 	}
 }
 
-// recDotsLine is the per-grid recording state (rec: BLM ● INT ● … + a frozen/
-// disabled suffix) — the top row of the bottom bar. It shows which grids are
-// accumulating right now; the loop badge itself lives in the status line below.
-func (m tuiModel) recDotsLine() string {
+// tabDot is the per-grid accumulation indicator appended to a grid tab's label:
+// ● when that grid is currently learning, ○ when loop gating has it frozen, and
+// "" for non-grid tabs. BLM needs closed loop + block-learn enable, INT needs
+// closed loop, O2/Spark accumulate whenever a good frame is present.
+func (m tuiModel) tabDot(v view) string {
 	ft := m.lastGood.FuelTrim
-	badge := stream.LoopBadge(ft, m.hasGood)
-	rest := strings.TrimPrefix(stream.LoopStatus(ft, m.hasGood), badge)
-	return dimStyle.Render(strings.TrimLeft(rest, " "))
+	on := false
+	switch v {
+	case viewBLM:
+		on = m.hasGood && ft.ClosedLoop && ft.BLMEnabled
+	case viewINT:
+		on = m.hasGood && ft.ClosedLoop
+	case viewO2, viewSpark:
+		on = m.hasGood
+	default:
+		return ""
+	}
+	if on {
+		return " ●"
+	}
+	return " ○"
 }
 
-// heartbeat is the per-frame data-quality tick: green ● when the latest frame
-// parsed and PROM-matched, red ● otherwise (WinALDL's flashing indicator), and
-// a red hollow ○ when the live stream has gone stale — a glyph change, not just
-// colour, so a stalled connection reads even without colour.
-func (m tuiModel) heartbeat() string {
+// healthLevel classifies recent stream quality from the sliding parse window —
+// pure over model fields, so the colour choice is unit-testable (lipgloss strips
+// colour off a TTY, so asserting the rendered glyph can't distinguish styles).
+type healthLevel int
+
+const (
+	healthNone healthLevel = iota // no frames yet
+	healthGood                    // essentially all recent frames parse → green
+	healthWarn                    // some recent loss → amber
+	healthBadL                    // heavy recent loss → red
+)
+
+// Heartbeat window and colour thresholds on the recent good-frame fraction.
+const (
+	healthWindowSize = 30   // recent frames the heartbeat colour reflects
+	beatGreenFrac    = 0.95 // ≥ this recent good fraction → green (≤1 bad in 30)
+	beatWarnFrac     = 0.80 // ≥ this → amber; below → red
+)
+
+func (m tuiModel) healthLevel() healthLevel {
+	if m.healthCount == 0 {
+		return healthNone
+	}
+	switch goodFrac := float64(m.healthCount-m.healthBad) / float64(m.healthCount); {
+	case goodFrac >= beatGreenFrac:
+		return healthGood
+	case goodFrac >= beatWarnFrac:
+		return healthWarn
+	default:
+		return healthBadL
+	}
+}
+
+// signalDot is the signal-quality indicator: a filled ● whose colour is the
+// recent parse quality (green/amber/red). It reflects live reception on a live
+// source and — since replay re-processes the recorded frames through the same
+// health window — replays the signal quality that was actually captured. A
+// hollow ○ means no signal: dim before the first frame, red once a *live* stream
+// that was flowing goes stale (replay is stale-exempt, so it never shows this).
+func (m tuiModel) signalDot() string {
 	if stale, _ := m.stale(); stale {
-		return beatBad.Render("○")
+		return beatBad.Render("○") // a live stream that went quiet
 	}
-	if m.latest.ParseOK && m.latest.PROMOK {
+	switch m.healthLevel() {
+	case healthGood:
 		return beatOK.Render("●")
+	case healthWarn:
+		return beatWarn.Render("●")
+	case healthBadL:
+		return beatBad.Render("●")
+	default:
+		return dimStyle.Render("○") // no frames yet
 	}
-	return beatBad.Render("●")
+}
+
+// pushHealth slides the heartbeat health window by one frame, keeping healthBad
+// in sync as old entries are evicted.
+func (m *tuiModel) pushHealth(ok bool) {
+	if m.healthCount == healthWindowSize && !m.healthWindow[m.healthHead] {
+		m.healthBad-- // evicting a bad entry
+	}
+	m.healthWindow[m.healthHead] = ok
+	if !ok {
+		m.healthBad++
+	}
+	m.healthHead = (m.healthHead + 1) % healthWindowSize
+	if m.healthCount < healthWindowSize {
+		m.healthCount++
+	}
 }
 
 // errorPanel renders the full-screen diagnosis shown when the session dies with
@@ -1139,7 +1700,7 @@ func (m tuiModel) errorPanel() string {
 		fmt.Fprintf(&b, "  %s\n", dimStyle.Render("• Wrong baud rate?  add  -b 2400"))
 		fmt.Fprintf(&b, "  %s\n\n", dimStyle.Render("• Non-inverting cable?  add  -invert"))
 	}
-	fmt.Fprintf(&b, "  %s", dimStyle.Render("q quit"))
+	fmt.Fprintf(&b, "  %s", dimStyle.Render("[q] quit"))
 	return b.String()
 }
 
@@ -1172,7 +1733,7 @@ func (m tuiModel) knockFreeRunning() bool {
 
 func (m tuiModel) rawView() string {
 	head := fmt.Sprintf("  offset %d   %s\n\n", m.latest.Frame.ByteOffset, promMark(m.latest.PROMOK))
-	return head + stream.RawHistory(m.def.ByteLabels, m.history, m.width)
+	return head + stream.RawHistory(m.def.ByteLabels, m.history, m.contentWidth())
 }
 
 func promMark(ok bool) string {

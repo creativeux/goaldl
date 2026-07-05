@@ -24,3 +24,33 @@ Implementation checklist for [spec-phaseA.md](spec-phaseA.md). Consumer/presenta
 
 ## Verify
 - [x] **T10** `go test -race -count=1 ./...` green; `go vet` + `gofmt -l pkg cmd` clean; decoder goldens byte-identical (no `-update`); `blm` still 469 over `drive_4800.raw`; forbidden-seam diff (`session.go`/`ecm`/`decoder`/`blm`/`go.mod`) empty, only `gridviews.go` `SparkBody` in `pkg/stream`.
+
+---
+
+# Tasks: TUI UX Pass — Phase C (Session safety + unified outputs)
+
+Implementation checklist for [spec-phaseC.md](spec-phaseC.md). Consumer/presentation-only (`cmd/goaldl` + new `framebuf.go`; reuse of unchanged `RecordSink`/`saveGrids`/`frameCSV`). Forbidden seam stays empty; goldens byte-identical; `blm` 469.
+
+## Slice 1 — C.0 unified outputs
+
+- [x] **C1** `cmd/goaldl/framebuf.go` (new): `bufFrame` (data/elapsedSec/byteOffset/parseOK/promOK/vals) + `frameBuf` ring (`push`/`frames`/`fillPct`), `frameBufCap = 3600`.
+- [x] **C2** `cmd/goaldl/framebuf_test.go` (new): `TestFrameBuf` — wrap keeps last cap in oldest→newest order; partial fill count + pct; empty.
+- [x] **C3** `cmd/goaldl/csv.go`: `frameCSV.WriteRow(bufFrame)` sharing the row body with `Write` (header/`%.2f` unchanged; ParseOK-only).
+- [x] **C4** `cmd/goaldl/tui.go`: refactor `saveGrids` → `saveGrids(dir, base string, sel []gridSel, minSamples int)` (`gridSel{id,suffix,write}`); build the four selectors from the grids.
+- [x] **C5** `cmd/goaldl/tui.go`: `outputPicker` modal (state `op`/`items`/`cursor`/`name`/`hint`); key handling (↑↓ move, space toggle, runes/backspace edit name row, enter confirm, esc cancel, ctrl+c quit); render (checklist + name + resolved dest dir, F17).
+- [x] **C6** `cmd/goaldl/tui.go`: ring `push` in `snapshotMsg` (every frame; vals in `def.Parameters` order); `buf` field.
+- [x] **C7** `cmd/goaldl/tui.go`: `confirmSaveBuffer` (pre-check all targets; write selected grids via `saveGrids` subset + Sensor CSV by replaying `buf.frames()` through `WriteRow`; record `written`; clear `dirtyGrids`); `s` opens the Save Buffer picker.
+- [x] **C8** `cmd/goaldl/tui.go`: `confirmLog` (pre-check; RAW→`recSink.Set` + CSV→`newFrameCSV`; `logging=true`); `r` = Log toggle (stop if open, else picker); RAW item hidden when `recSink==nil`; **remove `d`** from key switch + legend.
+- [x] **C9** `cmd/goaldl/tui.go`: footer `buf N%` + `LOG`/`REC` chrome (extend `sessionChrome`); `keyLegend` → `s save · c clear · r log · …` (drop `d csv`).
+- [x] **C10** `cmd/goaldl/tui_test.go`: `TestSaveBufferCSV` (retroactive, byte-identical to live `frameCSV`, no live CSV open); `TestSaveBufferGridSubset` (F18 single grid + collision keeps partial-safe); `TestLogForward` (RAW+CSV stream, `r` stops, `written` recorded, RAW hidden on replay).
+
+## Slice 2 — C.1–C.4 session safety
+
+- [ ] **C11** `cmd/goaldl/tui.go`: C.1 dirty tracking — `dirtyGrids` set in `accumulate`, cleared on grid-inclusive Save Buffer; `logging` derived (recFile/csvLog open). Ring is NOT dirty (documented).
+- [ ] **C12** `cmd/goaldl/tui.go`: C.2 quit guard — `quitArmed`; first `q` while `logging||dirtyGrids` arms + notice (no quit); second `q` quits; other key disarms; `ctrl+c` still immediate.
+- [ ] **C13** `cmd/goaldl/tui.go`: C.3 clear undo — `undoGrid`/`undoView`/`undoMins`/`undoMaxs`; `clear()` stashes; `u` restores + re-dirties; one slot; notice `… (u to undo)`.
+- [ ] **C14** `cmd/goaldl/tui.go`: C.4 exit summary — `written []outputRecord`; pure `sessionSummary()`; `cmdTUI` prints after teardown (≥1 frame); notice-lifecycle doc comments on `setNotice`/`warn`.
+- [ ] **C15** `cmd/goaldl/tui_test.go`: `TestQuitGuard`, `TestClearUndo`, `TestExitSummary`, `TestNoticeClasses`.
+
+## Verify
+- [x] **C16** `go test -race -count=1 ./...` green; `go vet` + `gofmt -l pkg cmd` clean; decoder goldens byte-identical (no `-update`); `blm` still 469 over `drive_4800.raw`; forbidden-seam diff (`pkg/stream/session.go`, `pkg/stream/stream.go`, `pkg/ecm`, `pkg/decoder`, `pkg/blm`, `go.mod`, `go.sum`) **empty**.

@@ -38,4 +38,20 @@ func (c *frameCSV) Write(tSec float64, byteOffset int64, promOK bool, parsed map
 	c.Rows++
 }
 
+// WriteRow writes one row from a buffered frame, whose values are already in
+// def.Parameters order. It skips frames that did not parse — parity with the
+// live Write path, which only emits ParseOK rows — so a Save Buffer CSV is
+// byte-identical to a live CSV over the same frames.
+func (c *frameCSV) WriteRow(f bufFrame) {
+	if !f.parseOK {
+		return
+	}
+	fmt.Fprintf(c.f, "%.2f,%d,%v", f.elapsedSec, f.byteOffset, f.promOK)
+	for _, v := range f.vals {
+		fmt.Fprintf(c.f, ",%.2f", v)
+	}
+	fmt.Fprintln(c.f)
+	c.Rows++
+}
+
 func (c *frameCSV) Close() error { return c.f.Close() }
