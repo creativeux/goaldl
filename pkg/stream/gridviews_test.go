@@ -63,7 +63,7 @@ func TestINTBodyGating(t *testing.T) {
 	g := blm.NewDefault()
 	g.Add(1600, 40, 130) // one INT sample in the active cell
 
-	closed := INTBody(g, gridFrame(0x82, 130, 0), 4, 130) // MWAF1 bit7+bit1
+	closed := INTBody(g, gridFrame(0x82, 130, 0), 4, 130, false) // MWAF1 bit7+bit1
 	if !strings.Contains(closed, "CLOSED LOOP") || !strings.Contains(closed, "INT 130") {
 		t.Errorf("closed-loop INTBody missing status:\n%s", closed)
 	}
@@ -71,7 +71,7 @@ func TestINTBodyGating(t *testing.T) {
 		t.Error("closed-loop INTBody missing active-cell highlight")
 	}
 
-	open := INTBody(g, gridFrame(0x00, 130, 0), 4, 130) // MWAF1=0 → open loop
+	open := INTBody(g, gridFrame(0x00, 130, 0), 4, 130, false) // MWAF1=0 → open loop
 	if !strings.Contains(open, "integrator frozen") {
 		t.Errorf("open-loop INTBody missing frozen status:\n%s", open)
 	}
@@ -87,7 +87,7 @@ func TestO2BodyPrecision(t *testing.T) {
 	g := blm.NewDefault()
 	g.Add(1600, 40, 0.834)
 
-	out := O2Body(g, gridFrame(0x00, 0, 188), 0.834) // open loop, but O2 still shows
+	out := O2Body(g, gridFrame(0x00, 0, 188), 0.834, false) // open loop, but O2 still shows
 	if !strings.Contains(out, "O2 0.834 V") {
 		t.Errorf("O2Body status missing 3-decimal voltage:\n%s", out)
 	}
@@ -112,7 +112,7 @@ func TestSparkBody(t *testing.T) {
 	g.Add(1600, 40, 2) // two knock events in one cell: deltas 2 + 3
 	g.Add(1600, 40, 3)
 
-	out := SparkBody(g, gridFrame(0x00, 0, 0), 112) // open loop — spark unaffected
+	out := SparkBody(g, gridFrame(0x00, 0, 0), 112, false, true) // open loop; showInfo → explainer landmark
 	if !strings.Contains(out, "KNOCK_CNT 112") {
 		t.Errorf("SparkBody status missing raw counter:\n%s", out)
 	}
@@ -141,6 +141,39 @@ func TestSparkBody(t *testing.T) {
 	}
 }
 
+// TestSparkBodyFreeRunning: with freeRunning set, the status line carries the
+// warning and the explainer swaps to its free-run head; with it clear, the
+// output is byte-identical to the normal SparkBody (guards the normal path
+// against accidental drift).
+func TestSparkBodyFreeRunning(t *testing.T) {
+	g := blm.NewSpark()
+	g.Add(1600, 40, 2)
+	ev := gridFrame(0x00, 0, 0)
+
+	warned := SparkBody(g, ev, 112, true, true)
+	if !strings.Contains(warned, "free-running counter — not knock") {
+		t.Errorf("free-running SparkBody should warn in the status line:\n%s", warned)
+	}
+	if !strings.Contains(warned, "KNOCK_CNT is free-running") {
+		t.Errorf("free-running SparkBody should swap the explainer head:\n%s", warned)
+	}
+	if strings.Contains(warned, "The goal is 0") {
+		t.Errorf("free-running explainer must not keep the 'goal is 0' line:\n%s", warned)
+	}
+	// Grid values unchanged: the cell sum still shows at full brightness.
+	if !strings.Contains(warned, "    2") {
+		t.Errorf("free-running SparkBody must still show the grid values:\n%s", warned)
+	}
+
+	normal := SparkBody(g, ev, 112, false, true)
+	if strings.Contains(normal, "free-running") {
+		t.Errorf("normal SparkBody must not warn:\n%s", normal)
+	}
+	if !strings.Contains(normal, "The goal is 0") {
+		t.Errorf("normal SparkBody keeps its usual explainer:\n%s", normal)
+	}
+}
+
 // TestGridExplainers: each grid view carries its always-visible "what this
 // table means" block; the streaming BLMBody (monitor -blm) keeps the compact
 // one-line legend instead.
@@ -154,11 +187,33 @@ func TestGridExplainers(t *testing.T) {
 	if out := BLMBody(g, ev, 4); strings.Contains(out, "Block Learn Multiplier") || !strings.Contains(out, "target 128") {
 		t.Errorf("BLMBody (monitor) should keep the compact legend, not the explainer:\n%s", out)
 	}
-	if out := INTBody(g, ev, 4, 130); !strings.Contains(out, "Integrator") || !strings.Contains(out, "learned into BLM") {
-		t.Errorf("INTBody missing its explainer:\n%s", out)
+	if out := INTBody(g, ev, 4, 130, true); !strings.Contains(out, "Integrator") || !strings.Contains(out, "learned into BLM") {
+		t.Errorf("INTBody (showInfo) missing its explainer:\n%s", out)
 	}
-	if out := O2Body(g, ev, 0.834); !strings.Contains(out, "stoichiometric") || !strings.Contains(out, "0.45") {
-		t.Errorf("O2Body missing its explainer:\n%s", out)
+	if out := O2Body(g, ev, 0.834, true); !strings.Contains(out, "stoichiometric") || !strings.Contains(out, "0.45") {
+		t.Errorf("O2Body (showInfo) missing its explainer:\n%s", out)
+	}
+}
+
+// TestGridLegendAccordion: with showInfo false (the dashboard default) the grid
+// tabs render the compact one-line legend, not the multi-line explainer.
+func TestGridLegendAccordion(t *testing.T) {
+	g := blm.NewDefault()
+	ev := gridFrame(0x82, 130, 188)
+
+	if out := INTBody(g, ev, 4, 130, false); strings.Contains(out, "learned into BLM") || !strings.Contains(out, "read sustained cell averages") {
+		t.Errorf("collapsed INTBody should show the compact legend, not the explainer:\n%s", out)
+	}
+	if out := O2Body(g, ev, 0.834, false); strings.Contains(out, "stoichiometric") || !strings.Contains(out, "oscillates in closed loop") {
+		t.Errorf("collapsed O2Body should show the compact legend, not the explainer:\n%s", out)
+	}
+	if out := SparkBody(g, ev, 9, false, false); strings.Contains(out, "false knock") || !strings.Contains(out, "goal is 0 everywhere") {
+		t.Errorf("collapsed SparkBody should show the compact legend, not the explainer:\n%s", out)
+	}
+	// A collapsed, free-running Spark tab still carries the warning (in both the
+	// status line and the compact legend), even without the full explainer.
+	if out := SparkBody(g, ev, 9, true, false); !strings.Contains(out, "free-running") || strings.Contains(out, "working ESC") {
+		t.Errorf("collapsed free-running SparkBody should warn without the explainer:\n%s", out)
 	}
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"math"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -281,7 +283,8 @@ func TestTUIViewPerTab(t *testing.T) {
 		}
 	}
 
-	// Every grid tab carries its "what this table means" explainer.
+	// Grid explainers are collapsed by default (compact legend); pressing `i`
+	// expands the accordion and the "what this table means" block appears.
 	for _, tc := range []struct {
 		v      view
 		marker string
@@ -292,10 +295,16 @@ func TestTUIViewPerTab(t *testing.T) {
 		{viewSpark, "detonation"},
 	} {
 		mm.active = tc.v
+		mm.showInfo = false
+		if strings.Contains(mm.View(), tc.marker) {
+			t.Errorf("tab %d should hide its explainer by default (found %q)", tc.v, tc.marker)
+		}
+		mm.showInfo = true
 		if !strings.Contains(mm.View(), tc.marker) {
-			t.Errorf("tab %d missing its explainer (want %q)", tc.v, tc.marker)
+			t.Errorf("tab %d should show its explainer with showInfo (want %q)", tc.v, tc.marker)
 		}
 	}
+	mm.showInfo = false
 
 	mm.active = viewFlags
 	fv := mm.View()
@@ -883,5 +892,248 @@ func TestTUILoopLineHoldsLastGood(t *testing.T) {
 	mm2 := next2.(tuiModel)
 	if !strings.Contains(mm2.loopStatusLine(), "CLOSED LOOP") {
 		t.Errorf("after bad frame loop line = %q, want held CLOSED LOOP", mm2.loopStatusLine())
+	}
+}
+
+// TestTUIInfoAccordion: `i` toggles the grid explainer; it is collapsed by
+// default and expands to the full explainer, and toggling re-homes the scroll.
+func TestTUIInfoAccordion(t *testing.T) {
+	m := testModel()
+	next, _ := m.Update(snapshotMsg(recordableSnapshot()))
+	mm := next.(tuiModel)
+	mm.active = viewBLM
+
+	if mm.showInfo {
+		t.Fatal("explainer should be collapsed by default")
+	}
+	if strings.Contains(mm.View(), "Block Learn Multiplier") {
+		t.Error("collapsed BLM tab should not show the explainer")
+	}
+
+	mm.scroll = 3
+	toggled, _ := mm.Update(runes('i'))
+	tm := toggled.(tuiModel)
+	if !tm.showInfo {
+		t.Error("i should expand the explainer")
+	}
+	if tm.scroll != 0 {
+		t.Errorf("toggling the accordion should re-home scroll, got %d", tm.scroll)
+	}
+	if !strings.Contains(tm.View(), "Block Learn Multiplier") {
+		t.Error("expanded BLM tab should show the explainer")
+	}
+}
+
+// TestTUIBodyScroll: when the body is taller than the terminal, the frame is
+// clamped to the height (tabs never scroll off), the body window scrolls with
+// j/k, and switching tabs re-homes the scroll.
+func TestTUIBodyScroll(t *testing.T) {
+	m := testModel()
+	m.width, m.height = 80, 12 // deliberately short
+	next, _ := m.Update(snapshotMsg(recordableSnapshot()))
+	mm := next.(tuiModel)
+	mm.active = viewRaw // the tallest body (one row per frame byte)
+
+	// The whole frame fits the terminal height — the tab bar is never pushed off.
+	if lines := strings.Count(mm.View(), "\n") + 1; lines > mm.height {
+		t.Errorf("frame is %d lines, exceeds height %d (tabs would scroll off)", lines, mm.height)
+	}
+	if !strings.Contains(mm.View(), "Sensors") {
+		t.Error("the tab bar must stay visible on a short terminal")
+	}
+	if !strings.Contains(mm.View(), "scroll") {
+		t.Error("an overflowing body should show the scroll status line")
+	}
+
+	// j scrolls down; the position indicator advances.
+	down, _ := mm.Update(runes('j'))
+	dm := down.(tuiModel)
+	if dm.scroll != 1 {
+		t.Errorf("j should scroll down one line, got %d", dm.scroll)
+	}
+	// k cannot scroll above the top.
+	up, _ := mm.Update(runes('k'))
+	if s := up.(tuiModel).scroll; s != 0 {
+		t.Errorf("k at the top should stay at 0, got %d", s)
+	}
+	// scroll is clamped to maxScroll — hammering j never runs past the end.
+	hammered := dm
+	for i := 0; i < 500; i++ {
+		h, _ := hammered.Update(runes('j'))
+		hammered = h.(tuiModel)
+	}
+	if hammered.scroll != hammered.maxScroll() {
+		t.Errorf("scroll %d should be clamped to maxScroll %d", hammered.scroll, hammered.maxScroll())
+	}
+
+	// Switching tabs re-homes the scroll.
+	switched, _ := hammered.Update(runes('1'))
+	if s := switched.(tuiModel).scroll; s != 0 {
+		t.Errorf("switching tabs should reset scroll, got %d", s)
+	}
+}
+
+// knockSnapshot is a parseable closed-loop frame carrying a specific KNOCK_CNT
+// byte — for driving the free-running-counter detector with crafted deltas.
+func knockSnapshot(knock byte) stream.Snapshot {
+	def, _ := ecm.NewRegistry().GetDefinition("1227747")
+	f := make([]byte, 20)
+	f[1], f[2], f[6], f[7], f[14], f[17], f[18] = 24, 147, 99, 64, 0x82, knock, 118
+	sensors, _ := def.Parse(f)
+	return stream.Snapshot{
+		FrameEvent: stream.FrameEvent{Frame: decoder.Frame{Data: f}, Index: 0},
+		PROMOK:     true,
+		ParseOK:    true,
+		Sensors:    sensors,
+		FuelTrim:   ecm.FuelTrimSample(f),
+	}
+}
+
+// TestTUIFatalError: a transport error ends the stream with a diagnosis panel;
+// a clean end or the user's own cancellation is not an error.
+func TestTUIFatalError(t *testing.T) {
+	// Live source (replay == nil): fatal error → panel with the error text and
+	// the serial hints.
+	m := testModel()
+	next, _ := m.Update(providerDoneMsg{err: errors.New("serial: open /dev/cu.usbserial-10: no such file")})
+	mm := next.(tuiModel)
+	if mm.fatalErr == nil {
+		t.Fatal("a transport error should set fatalErr")
+	}
+	out := mm.View()
+	for _, want := range []string{"Cannot read from", "no such file", "goaldl ports", "-invert"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("error panel missing %q:\n%s", want, out)
+		}
+	}
+
+	// Replay source: same fatal path, but no serial hints (the file, not a port).
+	r := testModel()
+	r.replay = &stream.ReplayProvider{}
+	nr, _ := r.Update(providerDoneMsg{err: errors.New("decode failed")})
+	if out := nr.(tuiModel).View(); strings.Contains(out, "goaldl ports") {
+		t.Errorf("replay error panel should omit serial hints:\n%s", out)
+	}
+
+	// User quit (context.Canceled): stream done, but not an error.
+	c := testModel()
+	nc, _ := c.Update(providerDoneMsg{err: context.Canceled})
+	if mc := nc.(tuiModel); mc.fatalErr != nil || !mc.done {
+		t.Errorf("cancellation: fatalErr=%v done=%v, want nil/true", mc.fatalErr, mc.done)
+	}
+
+	// Clean end (nil): the existing "(stream ended)" path, no panel.
+	e := testModel()
+	ne, _ := e.Update(providerDoneMsg{err: nil})
+	if me := ne.(tuiModel); me.fatalErr != nil {
+		t.Errorf("clean end should not set fatalErr, got %v", me.fatalErr)
+	}
+}
+
+// TestTUIStale: a live stream that goes quiet past staleAfter is flagged (hollow
+// heartbeat + footer age); replay, pre-frame, and ended streams are never stale,
+// and a fresh frame clears it.
+func TestTUIStale(t *testing.T) {
+	// Live model with one frame delivered.
+	base := testModel()
+	next, _ := base.Update(snapshotMsg(recordableSnapshot()))
+	mm := next.(tuiModel)
+
+	// 6.1s since the last frame → stale.
+	mm.now = mm.lastFrameAt.Add(6100 * time.Millisecond)
+	if stale, _ := mm.stale(); !stale {
+		t.Error("6.1s of silence on a live source should be stale")
+	}
+	if !strings.Contains(mm.heartbeat(), "○") {
+		t.Errorf("stale heartbeat should be the hollow glyph, got %q", mm.heartbeat())
+	}
+	if !strings.Contains(mm.View(), "no data") {
+		t.Error("stale view footer should show 'no data'")
+	}
+
+	// 2s → still fresh.
+	mm.now = mm.lastFrameAt.Add(2 * time.Second)
+	if stale, _ := mm.stale(); stale {
+		t.Error("2s of silence should not be stale")
+	}
+
+	// Replay is never stale, however long.
+	rep := testModel()
+	rep.replay = &stream.ReplayProvider{}
+	nr, _ := rep.Update(snapshotMsg(recordableSnapshot()))
+	rm := nr.(tuiModel)
+	rm.now = rm.lastFrameAt.Add(30 * time.Second)
+	if stale, _ := rm.stale(); stale {
+		t.Error("a replay source should never be flagged stale")
+	}
+
+	// An ended stream reports (stream ended), not stale.
+	mm.done = true
+	mm.now = mm.lastFrameAt.Add(30 * time.Second)
+	if stale, _ := mm.stale(); stale {
+		t.Error("an ended stream should not be stale")
+	}
+
+	// Recovery: a new frame resets the clock.
+	mm.done = false
+	rec, _ := mm.Update(snapshotMsg(recordableSnapshot()))
+	if stale, _ := rec.(tuiModel).stale(); stale {
+		t.Error("a fresh frame should clear the stale flag")
+	}
+}
+
+// TestTUIKnockFreeRunning: the drive fixture's free-running KNOCK_CNT trips the
+// detector (and the Spark warning); a crafted sparse-knock stream does not; and
+// clearing the Spark grid preserves the detection window.
+func TestTUIKnockFreeRunning(t *testing.T) {
+	// Drive fixture: the counter advances nearly every frame.
+	raw, err := os.ReadFile(filepath.Join("..", "..", "pkg", "decoder", "testdata", "drive_4800.raw"))
+	if err != nil {
+		t.Fatalf("reading fixture: %v", err)
+	}
+	provider := &stream.ReplayProvider{Data: raw, Config: decoder.DefaultConfig(), Speed: 0}
+	session := stream.NewSession(provider, ecm.NewRegistry(), "1227747", 6291)
+	var cur tea.Model = testModel()
+	if err := session.Run(context.Background(), func(s stream.Snapshot) {
+		cur, _ = cur.Update(snapshotMsg(s))
+	}); err != nil {
+		t.Fatalf("session run: %v", err)
+	}
+	mm := cur.(tuiModel)
+	if !mm.knockFreeRunning() {
+		t.Error("drive fixture's free-running KNOCK_CNT should be detected")
+	}
+	mm.active = viewSpark
+	if !strings.Contains(mm.View(), "free-running counter — not knock") {
+		t.Error("Spark tab should warn when the counter is free-running")
+	}
+
+	// Crafted sparse knock: nonzero delta only every 10th frame → well under the
+	// threshold, so no warning.
+	sparse := testModel()
+	var sm tea.Model = sparse
+	for i := 0; i < 40; i++ {
+		sm, _ = sm.Update(snapshotMsg(knockSnapshot(byte((i / 10) * 5)))) // 0,0,…,5,…,10,…
+	}
+	if sm.(tuiModel).knockFreeRunning() {
+		t.Error("sparse knock (10% of frames) should not read as free-running")
+	}
+
+	// Clearing the Spark grid keeps the detection window (a fact about the
+	// counter, not the grid) and the knock baseline.
+	mm.active = viewSpark
+	cleared, _ := mm.Update(runes('c'))
+	cm := cleared.(tuiModel)
+	if !cm.knockFreeRunning() {
+		t.Error("clearing the Spark grid must preserve the free-running detection")
+	}
+	var sum float64
+	for _, row := range cm.sparkGrid.Sum() {
+		for _, v := range row {
+			sum += v
+		}
+	}
+	if sum != 0 {
+		t.Errorf("cleared spark grid should be empty, sum = %v", sum)
 	}
 }

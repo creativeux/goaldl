@@ -65,7 +65,7 @@ func BLMBody(g *blm.Grid, ev FrameEvent, minCount int) string {
 
 // BLMBodyExplained is BLMBody with the full "what this table means" block in
 // place of the compact legend — the dashboard variant, where the explainer is
-// always visible under the grid.
+// visible under the grid.
 func BLMBodyExplained(g *blm.Grid, ev FrameEvent, minCount int) string {
 	return blmBody(g, ev, minCount, blmExplainer)
 }
