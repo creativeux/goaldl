@@ -246,6 +246,18 @@ func TestGridWidthTruncation(t *testing.T) {
 			}
 		}
 	}
+
+	// Sub-usably-narrow (no room for even one 5-wide column): gridHeat emits the
+	// RPM label + › only, never a partial data digit. Because gridHeat keeps its
+	// own lines ≤ width, the caller's ANSI catch-all never has to cut a cell.
+	tiny := SparkBody(g, gridFrame(0x00, 0, 0), 9, false, false, 13)
+	for _, ln := range strings.Split(tiny, "\n") {
+		if strings.HasPrefix(ln, "  RPM") || strings.HasPrefix(ln, "   ") {
+			if w := ansi.StringWidth(ln); w > 13 {
+				t.Errorf("sub-narrow grid line exceeds width 13 (%d): %q", w, ln)
+			}
+		}
+	}
 }
 
 // TestSensorTableColumnDrop: under width pressure the table drops ALT first, then

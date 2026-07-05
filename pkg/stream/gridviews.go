@@ -29,11 +29,17 @@ func gridHeat(g *blm.Grid, values [][]float64, ar, ac, minCount, prec int, statu
 	samples := g.Samples()
 
 	// "  RPM\MAP" label is 9 cells; each MAP column is 5; reserve 2 for " ›".
+	// gridHeat self-limits so its lines never exceed width — the caller's
+	// ANSI catch-all must never have to cut a cell (that would show a partial,
+	// misleading number). When not even one column fits, emit the label + › only.
 	const labelW, cellW = 9, 5
 	cols := len(g.MAP)
 	truncated := false
 	if width > 0 {
-		if fit := (width - labelW - 2) / cellW; fit >= 1 && fit < cols {
+		switch fit := (width - labelW - 2) / cellW; {
+		case fit < 1:
+			cols, truncated = 0, true
+		case fit < cols:
 			cols, truncated = fit, true
 		}
 	}
