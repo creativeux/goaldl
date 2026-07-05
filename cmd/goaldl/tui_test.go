@@ -31,12 +31,30 @@ func testModel() tuiModel {
 		intGrid:    blm.NewDefault(),
 		o2Grid:     blm.NewDefault(),
 		sparkGrid:  blm.NewSpark(),
+		buf:        newFrameBuf(),
 		mins:       map[string]float64{},
 		maxs:       map[string]float64{},
 	}
 }
 
 func runes(r rune) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}} }
+
+// key helpers for driving the output picker in tests.
+var (
+	keyUp    = tea.KeyMsg{Type: tea.KeyUp}
+	keyDown  = tea.KeyMsg{Type: tea.KeyDown}
+	keySpace = tea.KeyMsg{Type: tea.KeySpace}
+	keyEnter = tea.KeyMsg{Type: tea.KeyEnter}
+	keyEsc   = tea.KeyMsg{Type: tea.KeyEscape}
+)
+
+// typeInto feeds each rune of s into the model as a KeyRunes message.
+func typeInto(m tea.Model, s string) tea.Model {
+	for _, r := range s {
+		m, _ = m.Update(runes(r))
+	}
+	return m
+}
 
 // recordableSnapshot is a closed-loop, block-learn-enabled frame (MWAF1=0x82),
 // PROM 24/147, RPM 1600, MAP ~47 kPa, BLM 118 — as a fully processed Snapshot
@@ -246,21 +264,18 @@ func TestTUIViewPerTab(t *testing.T) {
 	next, _ := m.Update(snapshotMsg(recordableSnapshot()))
 	mm := next.(tuiModel)
 
-	// Header shows the tab bar and source; the bottom bar shows the loop badge
-	// (in place of the old PROM mark), the heartbeat counts, and the rec dots.
+	// Title bar shows the brand + the Signal indicator; the grid tabs carry the
+	// per-grid accumulation dots.
 	v := mm.View()
-	for _, want := range []string{"Sensors", "BLM", "INT", "O2", "Spark", "Flags", "Codes", "Raw", "test", "1 ok / 0 bad"} {
+	for _, want := range []string{"Sensors", "BLM", "INT", "O2", "Spark", "Flags", "Codes", "Raw", "GoALDL", "Signal:"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("sensors view missing %q", want)
 		}
 	}
-	// The loop badge is in the status line and the per-grid recording dots are on
-	// the top row of the bottom bar (recordable frame → closed loop).
-	if !strings.Contains(v, "CLOSED LOOP") {
-		t.Error("footer status line should show the loop badge")
-	}
-	if !strings.Contains(v, "rec: BLM") {
-		t.Error("bottom bar should show the per-grid recording dots")
+	// The per-grid accumulation dots are on the grid tabs themselves (recordable
+	// frame → closed loop → BLM ●). (The loop word itself is not in the title bar.)
+	if !strings.Contains(v, "BLM ●") {
+		t.Error("BLM tab should carry a filled accumulation dot on a closed-loop frame")
 	}
 	if strings.Contains(v, "PROM ✓") {
 		t.Error("PROM mark should no longer be in the sensor-tab chrome (replaced by the loop badge)")
@@ -414,7 +429,8 @@ func TestSaveGrids(t *testing.T) {
 
 	dir := t.TempDir()
 	const base = "session42"
-	if err := saveGrids(dir, base, mm.grid, mm.intGrid, mm.o2Grid, mm.sparkGrid, mm.minSamples); err != nil {
+	sels := allGridSels(mm.grid, mm.intGrid, mm.o2Grid, mm.sparkGrid, mm.minSamples)
+	if err := saveGrids(dir, base, sels); err != nil {
 		t.Fatalf("saveGrids: %v", err)
 	}
 
@@ -448,7 +464,7 @@ func TestSaveGrids(t *testing.T) {
 
 	// A second save to the same base must refuse (exclusive create), not
 	// overwrite.
-	if err := saveGrids(dir, base, mm.grid, mm.intGrid, mm.o2Grid, mm.sparkGrid, mm.minSamples); !errors.Is(err, fs.ErrExist) {
+	if err := saveGrids(dir, base, sels); !errors.Is(err, fs.ErrExist) {
 		t.Errorf("second save err = %v, want fs.ErrExist", err)
 	}
 }
@@ -507,97 +523,117 @@ func TestTUISparkDeltaAccumulation(t *testing.T) {
 	}
 }
 
-// TestTUIPromptEditing: while the prompt is open, digits and q type into the
-// buffer (no tab switch, no quit); esc cancels without writing; enter writes
-// the four grid files under the edited base; an existing file keeps the
-// prompt open instead of overwriting.
-func TestTUIPromptEditing(t *testing.T) {
+// TestTUISaveBufferPicker: `s` opens the Save Buffer checklist (all outputs on,
+// no RAW). While it's open, q doesn't quit; esc cancels without writing; a
+// confirm writes the selected files under the edited name; re-confirming the
+// same name collides and keeps the picker open with a hint.
+func TestTUISaveBufferPicker(t *testing.T) {
 	dir := t.TempDir()
 	m := testModel()
 	next, _ := m.Update(snapshotMsg(recordableSnapshot()))
 	mm := next.(tuiModel)
 
-	// `s` opens the save prompt pre-filled with the timestamped default.
+	// `s` opens the Save Buffer picker: 5 outputs (csv + 4 grids), all on, no RAW.
 	next2, _ := mm.Update(runes('s'))
 	mm2 := next2.(tuiModel)
-	if mm2.prompt == nil || mm2.prompt.target != promptSave {
-		t.Fatal("s should open the save prompt")
+	if mm2.picker == nil || mm2.picker.op != opSaveBuffer {
+		t.Fatal("s should open the Save Buffer picker")
 	}
-	if !strings.HasPrefix(mm2.prompt.buf, "goaldl_") {
-		t.Errorf("prompt default = %q, want goaldl_<ts>", mm2.prompt.buf)
+	if len(mm2.picker.items) != 5 {
+		t.Errorf("picker has %d items, want 5", len(mm2.picker.items))
 	}
-	if !strings.Contains(mm2.View(), "save as:") {
-		t.Error("view should render the open prompt")
-	}
-
-	// Keys route to the buffer: digits don't switch tabs, q doesn't quit.
-	before := mm2.active
-	var cur tea.Model = mm2
-	for _, r := range "2q" {
-		var cmd tea.Cmd
-		cur, cmd = cur.Update(runes(r))
-		if cmd != nil {
-			t.Fatalf("typing %q returned a command (quit?)", r)
+	for _, it := range mm2.picker.items {
+		if it.id == "raw" {
+			t.Error("Save Buffer must not offer RAW")
 		}
 	}
-	mm3 := cur.(tuiModel)
-	if mm3.active != before {
-		t.Error("digit typed into the prompt switched tabs")
+	if !strings.HasPrefix(mm2.picker.name, "goaldl_") {
+		t.Errorf("default name = %q, want goaldl_<ts>", mm2.picker.name)
 	}
-	if !strings.HasSuffix(mm3.prompt.buf, "2q") {
-		t.Errorf("buffer = %q, want …2q appended", mm3.prompt.buf)
+	if mm2.picker.dir == "" {
+		t.Error("dir field should default to a working directory")
+	}
+	if !strings.Contains(mm2.View(), "Save Buffer") {
+		t.Error("view should render the open picker")
+	}
+
+	// q while the picker is open must not quit.
+	if _, cmd := mm2.Update(runes('q')); cmd != nil {
+		t.Fatal("q inside the picker returned a command (quit?)")
+	}
+
+	// Both path fields edit via keys: ↓ to the dir row then the name row, each
+	// accepting typed runes independently.
+	dirRow, nameRow := mm2.picker.dirRow(), mm2.picker.nameRow()
+	var cur tea.Model = mm2
+	for i := 0; i < dirRow; i++ {
+		cur, _ = cur.Update(keyDown)
+	}
+	cur = typeInto(cur, "X")
+	if p := cur.(tuiModel).picker; !strings.HasSuffix(p.dir, "X") {
+		t.Errorf("dir after typing = %q, want …X", p.dir)
+	}
+	cur, _ = cur.Update(keyDown) // to the name row
+	if cur.(tuiModel).picker.cursor != nameRow {
+		t.Fatalf("cursor = %d, want name row %d", cur.(tuiModel).picker.cursor, nameRow)
+	}
+	cur = typeInto(cur, "Y")
+	if p := cur.(tuiModel).picker; !strings.HasSuffix(p.name, "Y") {
+		t.Errorf("name after typing = %q, want …Y", p.name)
 	}
 
 	// Esc cancels without writing anything.
-	next4, _ := mm3.Update(tea.KeyMsg{Type: tea.KeyEscape})
-	mm4 := next4.(tuiModel)
-	if mm4.prompt != nil {
-		t.Fatal("esc should close the prompt")
+	next3, _ := cur.Update(keyEsc)
+	if next3.(tuiModel).picker != nil {
+		t.Fatal("esc should close the picker")
 	}
 	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
 		t.Errorf("esc wrote %d files, want 0", len(ents))
 	}
 
-	// Re-open, replace the buffer with a temp-dir base, confirm: 4 files.
-	next5, _ := mm4.Update(runes('s'))
+	// Re-open, set the dir + name fields separately, confirm: 4 grid files + CSV.
+	next4, _ := next3.(tuiModel).Update(runes('s'))
+	mm4 := next4.(tuiModel)
+	mm4.picker.dir, mm4.picker.name = dir, "mysession"
+	next5, _ := mm4.Update(keyEnter)
 	mm5 := next5.(tuiModel)
-	mm5.prompt.buf = filepath.Join(dir, "mysession")
-	next6, _ := mm5.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	mm6 := next6.(tuiModel)
-	if mm6.prompt != nil {
-		t.Fatalf("enter should close the prompt (hint %q)", mm6.prompt.hint)
+	if mm5.picker != nil {
+		t.Fatalf("enter should close the picker (hint %q)", mm4.picker.hint)
 	}
-	if !strings.Contains(mm6.notice, "mysession") {
-		t.Errorf("notice = %q, want the saved base", mm6.notice)
+	if !strings.Contains(mm5.notice, "mysession") {
+		t.Errorf("notice = %q, want the saved base", mm5.notice)
 	}
 	for _, s := range []string{"BLM", "INT", "O2", "SPARK"} {
 		if _, err := os.Stat(filepath.Join(dir, "mysession_"+s+".txt")); err != nil {
 			t.Errorf("missing %s file: %v", s, err)
 		}
 	}
-
-	// Confirming the same base again collides: prompt stays open with a hint.
-	next7, _ := mm6.Update(runes('s'))
-	mm7 := next7.(tuiModel)
-	mm7.prompt.buf = filepath.Join(dir, "mysession")
-	next8, _ := mm7.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	mm8 := next8.(tuiModel)
-	if mm8.prompt == nil {
-		t.Fatal("collision should keep the prompt open")
+	if _, err := os.Stat(filepath.Join(dir, "mysession.csv")); err != nil {
+		t.Errorf("missing csv: %v", err)
 	}
-	if mm8.prompt.hint == "" {
-		t.Error("collision should set the prompt hint")
+
+	// Confirming the same dir+name again collides: picker stays open with a hint.
+	next6, _ := mm5.Update(runes('s'))
+	mm6 := next6.(tuiModel)
+	mm6.picker.dir, mm6.picker.name = dir, "mysession"
+	next7, _ := mm6.Update(keyEnter)
+	mm7 := next7.(tuiModel)
+	if mm7.picker == nil {
+		t.Fatal("collision should keep the picker open")
+	}
+	if mm7.picker.hint == "" {
+		t.Error("collision should set the picker hint")
 	}
 }
 
-// TestTUINoticeExpiry: a no-op warning (e.g. `r` during replay) arms a timer
-// and clears itself when it fires; a stale timer never wipes a newer notice.
+// TestTUINoticeExpiry: a no-op warning (e.g. pause/speed with no replay) arms a
+// timer and clears itself when it fires; a stale timer never wipes a newer notice.
 func TestTUINoticeExpiry(t *testing.T) {
-	m := testModel() // replay-style model: no RecordSink
-	next, cmd := m.Update(runes('r'))
+	m := testModel() // no replay handle: space is a no-op warning
+	next, cmd := m.Update(keySpace)
 	mm := next.(tuiModel)
-	if !strings.Contains(mm.notice, "live source") {
-		t.Fatalf("notice = %q, want live-source warning", mm.notice)
+	if !strings.Contains(mm.notice, "replay-only") {
+		t.Fatalf("notice = %q, want replay-only warning", mm.notice)
 	}
 	if cmd == nil {
 		t.Fatal("warning should arm an expiry timer")
@@ -620,74 +656,78 @@ func TestTUINoticeExpiry(t *testing.T) {
 	}
 }
 
-// TestTUIRecordingToggle: `r` is a notice-only no-op on replay (no RecordSink);
-// with a live sink it prompts, records through the sink, and stops with a
-// byte-count notice.
-func TestTUIRecordingToggle(t *testing.T) {
-	// Replay source: no sink.
-	m := testModel()
-	next, _ := m.Update(runes('r'))
-	mm := next.(tuiModel)
-	if mm.prompt != nil {
-		t.Fatal("r on replay must not open a prompt")
+// TestLogForward: `r` opens the Log picker (forward streaming). RAW is offered
+// only when a live sink is present. Confirming RAW+CSV attaches the sink and
+// opens the CSV; new frames flow to both; a second `r` stops both, records them
+// for the exit summary, and leaves usable files.
+func TestLogForward(t *testing.T) {
+	// Replay-style model (no sink): the Log picker lists RAW but disables it
+	// (visible, not hidden) so its selection is a no-op.
+	noSink := testModel()
+	np, _ := noSink.Update(runes('l'))
+	npm := np.(tuiModel)
+	if npm.picker == nil || npm.picker.op != opLog {
+		t.Fatal("l should open the Log picker")
 	}
-	if !strings.Contains(mm.notice, "live source") {
-		t.Errorf("notice = %q, want live-source explanation", mm.notice)
+	var disabledRaw *fmtItem
+	for i := range npm.picker.items {
+		if npm.picker.items[i].id == "raw" {
+			disabledRaw = &npm.picker.items[i]
+		}
+	}
+	if disabledRaw == nil || !disabledRaw.disabled {
+		t.Fatal("Log picker should list RAW disabled when there is no live sink")
+	}
+	// Space on the disabled RAW must not select it, and warns why.
+	npm.picker.cursor = 0 // RAW is first
+	nd, _ := npm.Update(keySpace)
+	if p := nd.(tuiModel).picker; p.items[0].on {
+		t.Error("space toggled a disabled item")
+	} else if p.hint == "" {
+		t.Error("space on a disabled item should hint why")
+	}
+	// Same outputs as Save Buffer minus the disabled RAW: csv + 4 grids.
+	if got := npm.picker.selected(); len(got) != 5 || contains(got, "raw") {
+		t.Errorf("selected = %v, want csv + 4 grids (disabled raw excluded)", got)
 	}
 
-	// Live source: sink present.
+	// Live model: sink present → RAW offered, off by default.
 	dir := t.TempDir()
 	live := testModel()
 	live.recSink = &stream.RecordSink{}
-	next2, _ := live.Update(runes('r'))
-	mm2 := next2.(tuiModel)
-	if mm2.prompt == nil || mm2.prompt.target != promptRecord {
-		t.Fatal("r with a sink should open the record prompt")
+	lp, _ := live.Update(runes('l'))
+	lpm := lp.(tuiModel)
+	var rawItem *fmtItem
+	for i := range lpm.picker.items {
+		if lpm.picker.items[i].id == "raw" {
+			rawItem = &lpm.picker.items[i]
+		}
 	}
-	mm2.prompt.buf = filepath.Join(dir, "capture")
-	next3, _ := mm2.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	mm3 := next3.(tuiModel)
-	if mm3.recFile == nil || !mm3.recSink.Active() {
-		t.Fatal("confirm should attach the recording target")
+	if rawItem == nil {
+		t.Fatal("Log picker should offer RAW on a live source")
 	}
-	if !strings.Contains(mm3.notice, "recording → ") {
-		t.Errorf("notice = %q, want recording start", mm3.notice)
+	if rawItem.disabled {
+		t.Error("RAW should be enabled on a live source")
 	}
-	// The provider's writes flow through the sink into the file.
-	mm3.recSink.Write([]byte{0xFE, 0x00, 0xFE})
-
-	next4, _ := mm3.Update(runes('r'))
-	mm4 := next4.(tuiModel)
-	if mm4.recFile != nil || mm4.recSink.Active() {
-		t.Fatal("second r should stop the recording")
+	if rawItem.on {
+		t.Error("RAW should default off")
 	}
-	if !strings.Contains(mm4.notice, "stopped recording") || !strings.Contains(mm4.notice, "3 B") {
-		t.Errorf("notice = %q, want stopped + 3 B", mm4.notice)
-	}
-	b, err := os.ReadFile(filepath.Join(dir, "capture.raw"))
-	if err != nil || len(b) != 3 {
-		t.Errorf("capture.raw = %d bytes (%v), want 3", len(b), err)
-	}
-}
-
-// TestTUICSVToggle: `d` starts a CSV log that writes one row per ParseOK frame
-// (bad frames skipped — monitor parity) and stops with a row-count notice.
-func TestTUICSVToggle(t *testing.T) {
-	dir := t.TempDir()
-	m := testModel()
-	next, _ := m.Update(runes('d'))
+	// Select RAW (cursor starts on it), keep CSV on, set dir+name, confirm.
+	lpm.picker.items[0].on = true // raw is first
+	lpm.picker.dir, lpm.picker.name = dir, "drive"
+	next, _ := lpm.Update(keyEnter)
 	mm := next.(tuiModel)
-	if mm.prompt == nil || mm.prompt.target != promptCSV {
-		t.Fatal("d should open the csv prompt")
+	if mm.picker != nil {
+		t.Fatalf("confirm should close the picker (hint %q)", lpm.picker.hint)
 	}
-	mm.prompt.buf = filepath.Join(dir, "log")
-	next2, _ := mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	mm2 := next2.(tuiModel)
-	if mm2.csvLog == nil {
-		t.Fatal("confirm should open the csv log")
+	if mm.recFile == nil || !mm.recSink.Active() || mm.csvLog == nil {
+		t.Fatal("confirm should open both the raw sink and the CSV log")
 	}
 
-	var cur tea.Model = mm2
+	// Forward streaming: a ParseOK frame writes a CSV row; a bad frame doesn't;
+	// the raw sink takes whatever the provider writes.
+	mm.recSink.Write([]byte{0xFE, 0x00, 0xFE})
+	var cur tea.Model = mm
 	cur, _ = cur.Update(snapshotMsg(recordableSnapshot()))
 	bad := stream.Snapshot{
 		FrameEvent: stream.FrameEvent{Frame: decoder.Frame{Data: []byte{0xDE, 0xAD}}, Index: 1},
@@ -695,29 +735,134 @@ func TestTUICSVToggle(t *testing.T) {
 	}
 	cur, _ = cur.Update(snapshotMsg(bad))
 	cur, _ = cur.Update(snapshotMsg(recordableSnapshot()))
-	mm3 := cur.(tuiModel)
-	if mm3.csvLog.Rows != 2 {
-		t.Errorf("csv rows = %d, want 2 (ParseOK frames only)", mm3.csvLog.Rows)
+	mm2 := cur.(tuiModel)
+	if mm2.csvLog.Rows != 2 {
+		t.Errorf("csv rows = %d, want 2 (ParseOK only)", mm2.csvLog.Rows)
 	}
 
-	next4, _ := mm3.Update(runes('d'))
-	mm4 := next4.(tuiModel)
-	if mm4.csvLog != nil {
-		t.Fatal("second d should stop the log")
+	// Crash-proof: the aggregate tables are already complete on disk mid-log,
+	// before any stop — a crash here would still leave a usable BLM table.
+	if b, err := os.ReadFile(filepath.Join(dir, "drive_BLM.txt")); err != nil || !strings.Contains(string(b), "Wide Average BLM") {
+		t.Errorf("drive_BLM.txt not written live mid-log: %v", err)
 	}
-	if !strings.Contains(mm4.notice, "2 rows") {
-		t.Errorf("notice = %q, want 2 rows", mm4.notice)
+	if _, err := os.Stat(filepath.Join(dir, "drive_BLM.txt.tmp")); err == nil {
+		t.Error("temp file left behind — atomic rename should remove it")
 	}
-	b, err := os.ReadFile(filepath.Join(dir, "log.csv"))
+
+	// Second `l` stops streams + finalises grids, recording all for the summary.
+	next2, _ := mm2.Update(runes('l'))
+	mm3 := next2.(tuiModel)
+	if mm3.recFile != nil || mm3.recSink.Active() || mm3.csvLog != nil {
+		t.Fatal("second l should stop the log")
+	}
+	if mm3.logActive() {
+		t.Error("stop should clear pending grid logging")
+	}
+	if len(mm3.written) != 6 { // raw + csv + 4 grids
+		t.Errorf("written records = %d, want 6 (raw + csv + 4 grids)", len(mm3.written))
+	}
+	if !strings.Contains(mm3.notice, "stopped log") {
+		t.Errorf("notice = %q, want stopped log", mm3.notice)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "drive.raw")); err != nil || len(b) != 3 {
+		t.Errorf("drive.raw = %d bytes (%v), want 3", len(b), err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "drive.csv"))
 	if err != nil {
-		t.Fatalf("read log.csv: %v", err)
+		t.Fatalf("read drive.csv: %v", err)
 	}
-	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
-	if len(lines) != 3 { // header + 2 rows
+	if lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n"); len(lines) != 3 {
 		t.Errorf("csv has %d lines, want 3 (header + 2 rows)", len(lines))
 	}
-	if !strings.HasPrefix(lines[0], "time_sec,byte_offset,prom_ok") {
-		t.Errorf("csv header = %q", lines[0])
+	for _, s := range []string{"BLM", "INT", "O2", "SPARK"} {
+		if _, err := os.Stat(filepath.Join(dir, "drive_"+s+".txt")); err != nil {
+			t.Errorf("missing %s grid file: %v", s, err)
+		}
+	}
+}
+
+// TestSaveBufferCSV: the retroactive property — with NO live CSV ever open, a
+// Save Buffer CSV dumped from the frame ring is byte-identical to a live CSV
+// written over the same frames.
+func TestSaveBufferCSV(t *testing.T) {
+	dir := t.TempDir()
+	frames := []stream.Snapshot{recordableSnapshot(), recordableSnapshot(), recordableSnapshot()}
+
+	// (a) Reference: a live frameCSV over the frames (the retired `d` path).
+	ref := filepath.Join(dir, "ref.csv")
+	c, err := newFrameCSV(ref, testModel().def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range frames {
+		c.Write(s.Elapsed.Seconds(), s.Frame.ByteOffset, s.PROMOK, s.Sensors)
+	}
+	c.Close()
+
+	// (b) Retroactive: feed the frames into a model that never logs, then Save
+	// Buffer just the CSV.
+	var cur tea.Model = testModel()
+	for _, s := range frames {
+		cur, _ = cur.Update(snapshotMsg(s))
+	}
+	mm := cur.(tuiModel)
+	if mm.csvLog != nil {
+		t.Fatal("no live CSV should be open")
+	}
+	mm.picker = &outputPicker{op: opSaveBuffer, items: []fmtItem{{id: "csv", label: "Sensor CSV", on: true}}, name: filepath.Join(dir, "buf")}
+	next, _ := mm.Update(keyEnter)
+	if next.(tuiModel).picker != nil {
+		t.Fatal("confirm should close the picker")
+	}
+
+	refBytes, _ := os.ReadFile(ref)
+	bufBytes, err := os.ReadFile(filepath.Join(dir, "buf.csv"))
+	if err != nil {
+		t.Fatalf("read buf.csv: %v", err)
+	}
+	if string(bufBytes) != string(refBytes) {
+		t.Errorf("Save Buffer CSV differs from live CSV:\n got %q\nwant %q", bufBytes, refBytes)
+	}
+}
+
+// TestSaveBufferGridSubset: unchecking outputs saves only the selected grid
+// (F18 single-grid save); a name collision keeps the picker open with nothing
+// left on disk.
+func TestSaveBufferGridSubset(t *testing.T) {
+	dir := t.TempDir()
+	next, _ := testModel().Update(snapshotMsg(recordableSnapshot()))
+	mm := next.(tuiModel)
+
+	// Only BLM selected.
+	mm.picker = &outputPicker{op: opSaveBuffer, name: filepath.Join(dir, "one"), items: []fmtItem{
+		{id: "csv", label: "Sensor CSV"},
+		{id: "blm", label: "BLM grid", on: true},
+		{id: "int", label: "INT grid"},
+		{id: "o2", label: "O2 grid"},
+		{id: "spark", label: "SPARK grid"},
+	}}
+	n2, _ := mm.Update(keyEnter)
+	if n2.(tuiModel).picker != nil {
+		t.Fatal("confirm should close")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "one_BLM.txt")); err != nil {
+		t.Errorf("BLM not written: %v", err)
+	}
+	for _, s := range []string{"INT", "O2", "SPARK"} {
+		if _, err := os.Stat(filepath.Join(dir, "one_"+s+".txt")); err == nil {
+			t.Errorf("%s written but not selected", s)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "one.csv")); err == nil {
+		t.Error("csv written but not selected")
+	}
+
+	// Collision keeps the picker open, writes nothing new.
+	mm2 := n2.(tuiModel)
+	mm2.picker = &outputPicker{op: opSaveBuffer, name: filepath.Join(dir, "one"), items: []fmtItem{{id: "blm", label: "BLM grid", on: true}}}
+	n3, _ := mm2.Update(keyEnter)
+	if p := n3.(tuiModel).picker; p == nil || p.hint == "" {
+		t.Error("collision should keep the picker open with a hint")
 	}
 }
 
@@ -756,6 +901,64 @@ func TestTUICloseOutputs(t *testing.T) {
 	// A provider write after quit is safely discarded, not a panic/write-to-closed.
 	if n, err := m.recSink.Write([]byte{0xFE}); n != 1 || err != nil {
 		t.Errorf("post-quit sink write = (%d, %v), want discarded (1, nil)", n, err)
+	}
+}
+
+// TestTUILegendModeAware: the live legend is the constant baseline in both
+// modes; replay disables the live-only [l] log (struck through) and adds a
+// separate playback-nav row; [c] is labelled by the active tab and dropped where
+// it's a no-op; and [l] on replay warns.
+func TestTUILegendModeAware(t *testing.T) {
+	// Live: [l] log enabled; [c] labelled by the active grid.
+	live := testModel()
+	live.recSink = &stream.RecordSink{}
+	live.active = viewBLM
+	lg := live.keyLegend()
+	if !strings.Contains(lg, dimStyle.Render("[l] log")) {
+		t.Error("live legend should show [l] log enabled")
+	}
+	if !strings.Contains(lg, "[c] clear BLM") {
+		t.Error("live legend should label clear by the active grid")
+	}
+
+	// Replay: the live legend still shows [l] log but disabled (struck); the
+	// playback keys live on the separate replayNav row with the current speed.
+	rp := testModel()
+	rp.replay = &stream.ReplayProvider{Speed: 4}
+	rp.active = viewSensors
+	rg := rp.keyLegend()
+	if !strings.Contains(rg, offStyle.Render("[l] log")) {
+		t.Error("replay legend should show [l] log disabled (struck through)")
+	}
+	if !strings.Contains(rg, "[c] reset min/max") {
+		t.Error("replay sensor-tab legend should label clear as reset min/max")
+	}
+	if nav := rp.replayNav(); !strings.Contains(nav, "[space] pause") || !strings.Contains(nav, "speed (4×)") {
+		t.Errorf("replayNav %q missing pause/speed(4×)", nav)
+	}
+	// The playback row is only present in replay: live has no replayNav in its
+	// footer (chrome is one row shorter).
+	if live.chromeHeight() != 6 || rp.chromeHeight() != 7 {
+		t.Errorf("chromeHeight live=%d replay=%d, want 6/7", live.chromeHeight(), rp.chromeHeight())
+	}
+
+	// [c] is dropped on tabs where it does nothing (flags/codes/raw).
+	rp.active = viewFlags
+	if strings.Contains(rp.keyLegend(), "[c]") {
+		t.Error("flags-tab legend should have no [c]")
+	}
+
+	// [l] on replay warns and does not open the picker.
+	rp2 := testModel()
+	rp2.replay = &stream.ReplayProvider{Speed: 1}
+	n, cmd := rp2.Update(runes('l'))
+	if nm := n.(tuiModel); nm.picker != nil {
+		t.Error("[l] on replay should not open the Log picker")
+	} else if !strings.Contains(nm.notice, "live-only") {
+		t.Errorf("[l] on replay notice = %q, want live-only", nm.notice)
+	}
+	if cmd == nil {
+		t.Error("[l] on replay should arm a self-expiring warning")
 	}
 }
 
@@ -873,17 +1076,71 @@ func TestTUIDriveFixtureEndToEnd(t *testing.T) {
 		t.Error("extrema should be populated after the drive")
 	}
 
-	// Every tab renders (loop line is always present).
+	// Every tab renders with the title bar present.
 	for v := view(0); v < viewCount; v++ {
 		mm.active = v
 		out := mm.View()
-		if !strings.Contains(out, "LOOP") {
-			t.Errorf("tab %d missing the persistent loop-status line", v)
+		if !strings.Contains(out, "GoALDL") {
+			t.Errorf("tab %d missing the title bar", v)
 		}
 	}
 }
 
 // TestTUILoopLineHoldsLastGood: the loop badge (footer status line) reflects the
+// TestTUIHeartbeatQuality: the heartbeat classifies recent stream quality — good
+// (green) when the recent window is essentially all-parseable, warn (amber) on
+// some recent loss, bad (red) on heavy loss — and recovers as bad frames age out
+// of the window (the fix for "always yellow" from a rough start). The loop badge
+// carries a filled/hollow state circle.
+func TestTUIHeartbeatQuality(t *testing.T) {
+	badFrame := stream.Snapshot{FrameEvent: stream.FrameEvent{Frame: decoder.Frame{Data: []byte{0xDE}}}, ParseOK: false}
+	feed := func(m tea.Model, snap stream.Snapshot, n int) tea.Model {
+		for i := 0; i < n; i++ {
+			m, _ = m.Update(snapshotMsg(snap))
+		}
+		return m
+	}
+
+	// No frames yet → neutral, not warn/bad.
+	if got := testModel().healthLevel(); got != healthNone {
+		t.Errorf("pre-frame level = %v, want healthNone", got)
+	}
+	// A full window of good frames → good (green).
+	allGood := feed(testModel(), recordableSnapshot(), healthWindowSize).(tuiModel)
+	if got := allGood.healthLevel(); got != healthGood {
+		t.Errorf("all-good level = %v, want healthGood", got)
+	}
+	// A rough start (several bad) then a full clean window → recovers to good;
+	// this is the case that was stuck amber under the old cumulative ratio.
+	rough := feed(testModel(), badFrame, 5)
+	rough = feed(rough, recordableSnapshot(), healthWindowSize)
+	if got := rough.(tuiModel).healthLevel(); got != healthGood {
+		t.Errorf("recovered level = %v, want healthGood (bad frames aged out)", got)
+	}
+	// 4 bad in the last 30 (≈87% good) → amber; a heavy-loss window → red.
+	amber := feed(feed(testModel(), badFrame, 4), recordableSnapshot(), 26)
+	if got := amber.(tuiModel).healthLevel(); got != healthWarn {
+		t.Errorf("4/30-bad level = %v, want healthWarn", got)
+	}
+	red := feed(testModel(), badFrame, healthWindowSize)
+	if got := red.(tuiModel).healthLevel(); got != healthBadL {
+		t.Errorf("all-bad level = %v, want healthBadL", got)
+	}
+
+	// Loop badge state circles: ● closed, ○ open.
+	closed := feed(testModel(), recordableSnapshot(), 1).(tuiModel)
+	if !strings.Contains(closed.styledLoopBadge(), "● ") {
+		t.Errorf("closed-loop badge %q should lead with a filled ●", closed.styledLoopBadge())
+	}
+	ol := recordableSnapshot()
+	ol.Frame.Data[14] = 0 // MWAF1=0 → open loop
+	ol.FuelTrim = ecm.FuelTrimSample(ol.Frame.Data)
+	on, _ := testModel().Update(snapshotMsg(ol))
+	if !strings.Contains(on.(tuiModel).styledLoopBadge(), "○ ") {
+		t.Errorf("open-loop badge %q should lead with a hollow ○", on.(tuiModel).styledLoopBadge())
+	}
+}
+
 // last parseable frame and does not flicker on a following bad frame.
 func TestTUILoopLineHoldsLastGood(t *testing.T) {
 	m := testModel()
@@ -892,8 +1149,11 @@ func TestTUILoopLineHoldsLastGood(t *testing.T) {
 	if !strings.Contains(mm.styledLoopBadge(), "CLOSED LOOP") {
 		t.Errorf("loop badge = %q, want CLOSED LOOP", mm.styledLoopBadge())
 	}
-	if !strings.Contains(mm.recDotsLine(), "rec:") {
-		t.Errorf("rec-dots line = %q, want the per-grid recording dots", mm.recDotsLine())
+	if mm.tabDot(viewBLM) != " ●" {
+		t.Errorf("BLM tab dot = %q, want ● (closed loop, block-learn enabled)", mm.tabDot(viewBLM))
+	}
+	if mm.tabDot(viewSensors) != "" {
+		t.Errorf("non-grid tab dot = %q, want empty", mm.tabDot(viewSensors))
 	}
 
 	bad := stream.Snapshot{
@@ -904,6 +1164,10 @@ func TestTUILoopLineHoldsLastGood(t *testing.T) {
 	mm2 := next2.(tuiModel)
 	if !strings.Contains(mm2.styledLoopBadge(), "CLOSED LOOP") {
 		t.Errorf("after bad frame loop badge = %q, want held CLOSED LOOP", mm2.styledLoopBadge())
+	}
+	// The dot also holds the last-good loop state (not flickered by the bad frame).
+	if mm2.tabDot(viewBLM) != " ●" {
+		t.Errorf("after bad frame BLM dot = %q, want held ●", mm2.tabDot(viewBLM))
 	}
 }
 
@@ -938,7 +1202,7 @@ func TestTUIInfoAccordion(t *testing.T) {
 
 // TestTUIBodyScroll: when the body is taller than the terminal, the frame is
 // clamped to the height (tabs never scroll off), the body window scrolls with
-// j/k, and switching tabs re-homes the scroll.
+// the arrow keys, and switching tabs re-homes the scroll.
 func TestTUIBodyScroll(t *testing.T) {
 	m := testModel()
 	m.width, m.height = 80, 12 // deliberately short
@@ -957,21 +1221,21 @@ func TestTUIBodyScroll(t *testing.T) {
 		t.Error("an overflowing body should show the scroll status line")
 	}
 
-	// j scrolls down; the position indicator advances.
-	down, _ := mm.Update(runes('j'))
+	// ↓ scrolls down; the position indicator advances.
+	down, _ := mm.Update(keyDown)
 	dm := down.(tuiModel)
 	if dm.scroll != 1 {
-		t.Errorf("j should scroll down one line, got %d", dm.scroll)
+		t.Errorf("↓ should scroll down one line, got %d", dm.scroll)
 	}
-	// k cannot scroll above the top.
-	up, _ := mm.Update(runes('k'))
+	// ↑ cannot scroll above the top.
+	up, _ := mm.Update(keyUp)
 	if s := up.(tuiModel).scroll; s != 0 {
-		t.Errorf("k at the top should stay at 0, got %d", s)
+		t.Errorf("↑ at the top should stay at 0, got %d", s)
 	}
-	// scroll is clamped to maxScroll — hammering j never runs past the end.
+	// scroll is clamped to maxScroll — hammering ↓ never runs past the end.
 	hammered := dm
 	for i := 0; i < 500; i++ {
-		h, _ := hammered.Update(runes('j'))
+		h, _ := hammered.Update(keyDown)
 		hammered = h.(tuiModel)
 	}
 	if hammered.scroll != hammered.maxScroll() {
@@ -1001,11 +1265,15 @@ func TestTUIFrameHeight(t *testing.T) {
 		if len(lines) != h {
 			t.Errorf("height %d: frame has %d lines, want exactly %d", h, len(lines), h)
 		}
-		if last := lines[len(lines)-1]; !strings.Contains(last, "q quit") {
+		if last := lines[len(lines)-1]; !strings.Contains(last, "[s] save") {
 			t.Errorf("height %d: last line should be the key legend, got %q", h, last)
 		}
-		if statusLn := lines[len(lines)-2]; !strings.Contains(statusLn, "frame ") {
-			t.Errorf("height %d: second-to-last line should be the status, got %q", h, statusLn)
+		// Title bar (brand + status) on line 0, blank line 1, tab bar line 2.
+		if !strings.Contains(lines[0], "GoALDL") || !strings.Contains(lines[0], "Signal:") {
+			t.Errorf("height %d: title bar should carry the brand + status, got %q", h, lines[0])
+		}
+		if !strings.Contains(lines[2], "Sensors") {
+			t.Errorf("height %d: line 2 should be the tab bar, got %q", h, lines[2])
 		}
 	}
 
@@ -1116,8 +1384,8 @@ func TestTUIStale(t *testing.T) {
 	if stale, _ := mm.stale(); !stale {
 		t.Error("6.1s of silence on a live source should be stale")
 	}
-	if !strings.Contains(mm.heartbeat(), "○") {
-		t.Errorf("stale heartbeat should be the hollow glyph, got %q", mm.heartbeat())
+	if !strings.Contains(mm.signalDot(), "○") {
+		t.Errorf("stale signal should be the hollow glyph, got %q", mm.signalDot())
 	}
 	if !strings.Contains(mm.View(), "no data") {
 		t.Error("stale view footer should show 'no data'")

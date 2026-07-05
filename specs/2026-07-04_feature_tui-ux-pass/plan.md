@@ -29,9 +29,22 @@ Architecture stance (continuing the parity-phase pattern): the `Session`/`Snapsh
 
 ## Phase C — Session safety (F5, F14)
 
-**C.1 Dirty tracking.** Model tracks unsaved-grid state (any grid add since last `s`/start) and open outputs.
+**C.0 Unify session outputs — two operations (Save Buffer, Log), each picking its output formats at trigger time (user direction, 2026-07-04; models WinALDL's LOG Data checklist, `docs/winaldl/log.gif`).** Today three parallel output actions exist: `r` raw-record (live tee → `.raw`), `d` CSV log (streams decoded ParseOK frames → `.csv`), and `s` save-grids (snapshot → four `.txt`) — three verbs, three ad-hoc formats, and (in the earlier "record raw, decode later" idea) a second decision at the *end* about how to parse the raw. Collapse to **two operations, each opening a WinALDL-style format checklist at the moment you invoke it** (no persistent pre-set profile — you pick formats when you press the key):
 
-**C.2 Quit guard.** `q` with recording/CSV open or dirty grids → footer confirm ("unsaved grids, recording active — q again to quit, s to save"); second `q` (or timeout) quits. `ctrl+c` stays immediate (escape hatch).
+-   **Save Buffer (retroactive)** — dumps the in-memory decoded-frame buffer (a bounded ring, see below) in the selected formats. Checklist: **Sensor CSV** (decoded frames) · **Flags** · **Codes** + US/Metric. **No RAW option** — raw can't be reconstructed from decoded frames. This is the "I saw the anomaly and *wasn't* logging" path.
+-   **Log (forward, crash-tolerant)** — live-streams the selected formats to disk from now on. Checklist adds **RAW** to the same decoded set (Sensor CSV · Flags · Codes + units), RAW off by default (mirrors WinALDL). It streams each **target format directly** (e.g. CSV appended per frame), so a crash leaves a ready-to-use file — crash-tolerance comes from streaming the wanted format live, *not* from keeping raw and converting afterward. RAW is one optional archival checkbox; decoded formats stream durably without it.
+
+So the format decision lives *inside* each operation (chosen per invocation), and RAW is special only in that it exists on **Log** and not **Save Buffer** — because it is forward-only. The only other difference between the two is **direction** (retroactive snapshot vs. forward stream). The `d` CSV toggle is retired; today's grid text dumps (BLM/INT/O2/SPARK) fold in as additional saveable outputs (grid-retention nuance flagged below).
+
+**Bounded decoded-frame ring buffer + fill indicator (user direction).** Retroactive Save Buffer requires keeping decoded frames in memory (today the TUI retains only the last snapshot + accumulated grids). Make it a **fixed-size ring**: oldest frames drop as new ones arrive, so Save Buffer captures "the last N frames" (the recent window around an anomaly — the intended use) at deterministic memory cost. Chrome shows a **% full** indicator (fills 0→100 %, then holds ~100 % once wrapping) so the operator knows how much history is currently saveable. Store the **20-byte aligned frame** (not just parsed sensors) so a Save can re-parse under a different ECM layout later; only *re-decode* (baud/polarity/decoder fixes) then needs an actual RAW **Log**. Ring capacity: a spec parameter (e.g. a few thousand frames ≈ tens of minutes — pick with the user in the spec). Trade-off: the ring is lost on crash and only holds its window — durable, unbounded capture is exactly what **Log** provides.
+
+**Grid-retention nuance (for the spec).** The BLM/INT/O2/spark grids are whole-session *aggregates*, not a frame timeline, so they are not subject to the ring. If grid dumps are offered as Save Buffer checklist items, they'd reflect the full session while Sensor CSV/Flags/Codes reflect only the buffered window — a defensible but non-uniform retention story to make explicit (or grids become their own save action). Decide in spec-feature.
+
+Net key change: `d` goes away; format becomes a shared profile; a frame buffer backs retroactive Save. Dirty-tracking (C.1), the quit guard (C.2), and the exit summary (C.4) all key off this unified model, so it lands first in the phase.
+
+**C.1 Dirty tracking.** Model tracks unsaved state — grids hold data not yet written by a Save Buffer (the ring is transient by design, so "unsaved buffer" is softer — spec decides if it counts) — plus whether a Log stream is currently open (a separate "capture active" state, already durable on disk).
+
+**C.2 Quit guard.** `q` with a Log open or dirty (unsaved) data → footer confirm ("unsaved grids, logging active — q again to quit, s to save"); second `q` (or timeout) quits. `ctrl+c` stays immediate (escape hatch).
 
 **C.3 Clear guard.** Either confirm-style (`c` then `c`) or one-slot undo (`c` clears, notice "cleared BLM (u to undo)", undo restores the grid pointer). Decision for spec-feature; undo is one retained pointer, likely the cheaper UX.
 
@@ -63,6 +76,7 @@ Architecture stance (continuing the parity-phase pattern): the `Session`/`Snapsh
 
 ## Open decisions for spec-feature
 
+0. C.0 output model **mostly resolved** (2026-07-04): two operations — **Save Buffer** (retroactive, decoded-only checklist, dumps a bounded ring buffer) and **Log** (forward, crash-tolerant, checklist incl. optional RAW) — each pick formats at trigger time (no persistent profile); RAW appears only on Log; a fixed-size ring buffer with a % full indicator backs Save Buffer. **Remaining spec details:** ring capacity (frames/minutes); whether Flags/Codes file-outputs ship this slice or are stubbed selectable-later; and the grid-retention nuance (grids are whole-session aggregates — Save Buffer checklist item vs. their own action).
 1. `c` guard style: confirm vs one-slot undo (C.3).
 2. PROM-gated extrema: yes/no, and whether current-reading status lines gate too (E.5).
 3. Port picker in-TUI vs error-text-only (D.2).
