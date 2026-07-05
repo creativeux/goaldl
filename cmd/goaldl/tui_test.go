@@ -866,6 +866,136 @@ func TestSaveBufferGridSubset(t *testing.T) {
 	}
 }
 
+// TestTUIQuitGuard (C.2): q is guarded when a Log is open or grids are unsaved —
+// the first q arms + explains, a second quits; any other key disarms; ctrl+c is
+// always immediate; a clean model quits on the first q.
+func TestTUIQuitGuard(t *testing.T) {
+	// Clean model → q quits immediately.
+	if _, cmd := testModel().Update(runes('q')); cmd == nil {
+		t.Error("clean q should quit immediately")
+	}
+
+	// Dirty model (a recordable frame accumulated grids).
+	next, _ := testModel().Update(snapshotMsg(recordableSnapshot()))
+	dirty := next.(tuiModel)
+	if !dirty.unsaved() {
+		t.Fatal("a recordable frame should leave grids unsaved")
+	}
+	n1, cmd1 := dirty.Update(runes('q'))
+	m1 := n1.(tuiModel)
+	if cmd1 != nil {
+		t.Error("first q on a dirty model should not quit")
+	}
+	if !m1.quitArmed || !strings.Contains(m1.notice, "unsaved") {
+		t.Errorf("first q should arm + notice, got armed=%v notice=%q", m1.quitArmed, m1.notice)
+	}
+	if _, cmd2 := m1.Update(runes('q')); cmd2 == nil {
+		t.Error("second q should quit")
+	}
+
+	// A non-q key disarms; the following q re-arms (does not quit).
+	armed := n1.(tuiModel)
+	dis, _ := armed.Update(runes('2'))
+	if dm := dis.(tuiModel); dm.quitArmed {
+		t.Error("a non-q key should disarm the quit guard")
+	}
+	if _, cmd := dis.(tuiModel).Update(runes('q')); cmd != nil {
+		t.Error("q after a disarm should re-arm, not quit")
+	}
+
+	// ctrl+c is immediate even when dirty.
+	if _, cmd := dirty.Update(tea.KeyMsg{Type: tea.KeyCtrlC}); cmd == nil {
+		t.Error("ctrl+c should quit immediately even when dirty")
+	}
+
+	// A Log open with no dirty grids still guards.
+	live := testModel()
+	live.recSink = &stream.RecordSink{}
+	live.csvLog, live.csvName = &frameCSV{}, "x" // pretend a CSV log is open
+	if !live.logActive() {
+		t.Fatal("csvLog set should make logActive true")
+	}
+	if _, cmd := live.Update(runes('q')); cmd != nil {
+		t.Error("q with a Log open should be guarded, not quit")
+	}
+}
+
+// TestTUIClearUndo (C.3): c clears with an undo hint; u restores the last clear
+// (one slot) and re-dirties; u with nothing warns.
+func TestTUIClearUndo(t *testing.T) {
+	next, _ := testModel().Update(snapshotMsg(recordableSnapshot()))
+	base := next.(tuiModel)
+	base.active = viewBLM
+	if base.grid.TotalSamples() == 0 {
+		t.Fatal("BLM should have samples")
+	}
+
+	c1, _ := base.Update(runes('c'))
+	m1 := c1.(tuiModel)
+	if m1.grid.TotalSamples() != 0 {
+		t.Error("c should clear the BLM grid")
+	}
+	if !m1.canUndo || !strings.Contains(m1.notice, "undo") {
+		t.Errorf("clear should arm undo + hint, got canUndo=%v notice=%q", m1.canUndo, m1.notice)
+	}
+	u1, _ := m1.Update(runes('u'))
+	m2 := u1.(tuiModel)
+	if m2.grid.TotalSamples() == 0 {
+		t.Error("u should restore the BLM grid")
+	}
+	if m2.canUndo || !m2.dirtyGrids {
+		t.Errorf("undo consumes the slot + re-dirties, got canUndo=%v dirty=%v", m2.canUndo, m2.dirtyGrids)
+	}
+	// Nothing left to undo → self-expiring warning.
+	u2, cmd := m2.Update(runes('u'))
+	if cmd == nil || !strings.Contains(u2.(tuiModel).notice, "nothing to undo") {
+		t.Errorf("u with nothing should warn, got notice=%q", u2.(tuiModel).notice)
+	}
+
+	// One slot: clearing INT then BLM leaves only BLM undoable.
+	b := next.(tuiModel)
+	b.active = viewINT
+	ci, _ := b.Update(runes('c'))
+	cim := ci.(tuiModel)
+	cim.active = viewBLM
+	cb, _ := cim.Update(runes('c'))
+	uu, _ := cb.(tuiModel).Update(runes('u'))
+	um := uu.(tuiModel)
+	if um.grid.TotalSamples() == 0 {
+		t.Error("u should restore the most-recent clear (BLM)")
+	}
+	if um.intGrid.TotalSamples() != 0 {
+		t.Error("INT stays cleared — only one undo slot")
+	}
+}
+
+// TestTUIDirtyTracking (C.1): grids go dirty on accumulation, a grid-inclusive
+// Save Buffer clears it, and clearing all grids leaves nothing unsaved.
+func TestTUIDirtyTracking(t *testing.T) {
+	next, _ := testModel().Update(snapshotMsg(recordableSnapshot()))
+	if !next.(tuiModel).unsaved() {
+		t.Fatal("grids should be unsaved after accumulating")
+	}
+
+	saved := next.(tuiModel)
+	saved.picker = &outputPicker{op: opSaveBuffer, name: filepath.Join(t.TempDir(), "s"),
+		items: []fmtItem{{id: "blm", label: "BLM grid", on: true}}}
+	n2, _ := saved.Update(keyEnter)
+	if n2.(tuiModel).unsaved() {
+		t.Error("a grid save should clear the unsaved state")
+	}
+
+	cleared := next.(tuiModel)
+	for _, v := range []view{viewBLM, viewINT, viewO2, viewSpark} {
+		cleared.active = v
+		x, _ := cleared.Update(runes('c'))
+		cleared = x.(tuiModel)
+	}
+	if cleared.unsaved() {
+		t.Error("cleared grids hold no data → not unsaved")
+	}
+}
+
 // TestTUICloseOutputs: quitting with an active recording and CSV log detaches
 // the sink before closing the file (so the provider goroutine cannot write to
 // a closed handle) and closes both outputs.

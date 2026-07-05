@@ -360,21 +360,33 @@ type tuiModel struct {
 	hasKnockBase  bool               // first parsed frame only sets the baseline
 	mins, maxs    map[string]float64 // per-sensor extrema since last reset
 	hasExtrema    bool
-	notice        string         // transient footer message after a save/clear
-	noticeSeq     int            // bumped on every notice change; guards expiry timers
-	picker        *outputPicker  // modal output checklist (nil when inactive)
-	buf           *frameBuf      // always-on decoded-frame ring for Save Buffer
-	written       []outputRecord // files written this session (exit summary)
-	recFile       *os.File       // open raw-capture target (nil when not logging raw)
-	recName       string
-	csvLog        *frameCSV // open CSV log (nil when not logging CSV)
-	csvName       string
-	logBase       string        // base path for the active Log's grid snapshot (at stop)
-	logGridIDs    []string      // grids selected for the active Log, written when it stops
-	logStartAt    time.Duration // frame-timeline position when the active Log started (for the REC clock)
-	frameCount    int
-	done          bool
-	fatalErr      error // session's terminal error (nil = clean end / user quit)
+
+	// session safety (C.1–C.3): dirtyGrids is set when a grid accumulates and
+	// cleared by a grid-inclusive Save Buffer; quitArmed is the one-shot quit
+	// confirm; the undo* fields hold the single retained clear for [u].
+	dirtyGrids bool
+	quitArmed  bool
+	canUndo    bool
+	undoView   view
+	undoGrid   *blm.Grid
+	undoMins   map[string]float64
+	undoMaxs   map[string]float64
+
+	notice     string         // transient footer message after a save/clear
+	noticeSeq  int            // bumped on every notice change; guards expiry timers
+	picker     *outputPicker  // modal output checklist (nil when inactive)
+	buf        *frameBuf      // always-on decoded-frame ring for Save Buffer
+	written    []outputRecord // files written this session (exit summary)
+	recFile    *os.File       // open raw-capture target (nil when not logging raw)
+	recName    string
+	csvLog     *frameCSV // open CSV log (nil when not logging CSV)
+	csvName    string
+	logBase    string        // base path for the active Log's grid snapshot (at stop)
+	logGridIDs []string      // grids selected for the active Log, written when it stops
+	logStartAt time.Duration // frame-timeline position when the active Log started (for the REC clock)
+	frameCount int
+	done       bool
+	fatalErr   error // session's terminal error (nil = clean end / user quit)
 
 	// staleness (live only): lastFrameAt is when the newest snapshot arrived;
 	// now is advanced by the 1s tick. A live stream that has gone quiet for
@@ -452,8 +464,23 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		prevActive := m.active
+		// Any key other than a repeated q disarms the quit confirm (and clears its
+		// notice, which is the only notice showing while armed).
+		if m.quitArmed && msg.String() != "q" {
+			m.quitArmed, m.notice = false, ""
+		}
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c":
+			m.cancel() // the unconditional escape hatch
+			return m, tea.Quit
+		case "q":
+			// Guard the quit when there is an open Log or unsaved grid data: the
+			// first q arms + explains, a second q quits. Clean state quits at once.
+			if !m.quitArmed && (m.logActive() || m.unsaved()) {
+				m.quitArmed = true
+				m.setNotice(m.quitGuardMsg())
+				return m, nil
+			}
 			m.cancel()
 			return m, tea.Quit
 		case "1":
@@ -489,6 +516,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.openSaveBuffer()
 		case "c":
 			m.setNotice(m.clear())
+		case "u":
+			if !m.canUndo {
+				return m, m.warn("nothing to undo")
+			}
+			m.setNotice(m.undo())
 		case "l":
 			cmd := m.toggleLog() // sequence the mutation before reading m
 			return m, cmd
@@ -611,6 +643,7 @@ func (m *tuiModel) accumulate(s stream.Snapshot) {
 	ft := s.FuelTrim
 	if ft.Recordable() {
 		m.grid.Add(ft.RPM, ft.MapKPa, ft.BLM)
+		m.dirtyGrids = true
 	}
 	if !s.ParseOK {
 		return
@@ -619,6 +652,7 @@ func (m *tuiModel) accumulate(s stream.Snapshot) {
 		m.intGrid.Add(ft.RPM, ft.MapKPa, s.Sensors["integrator"])
 	}
 	m.o2Grid.Add(ft.RPM, ft.MapKPa, s.Sensors["oxygen_sensor"]/1000.0)
+	m.dirtyGrids = true // O2 accumulates on every parseable frame
 	// Spark bins per-frame deltas of the cumulative KNOCK_CNT byte (wraps at
 	// 255). The first parsed frame only establishes the baseline — WinALDL
 	// counts knocks during the session, not the counter's absolute value.
@@ -642,29 +676,76 @@ func (m *tuiModel) accumulate(s stream.Snapshot) {
 	m.hasExtrema = true
 }
 
-// clear resets state for the active tab: the viewed grid (BLM/INT/O2/Spark)
-// or, on the sensor tab, the Min/Max extrema. Other tabs are a no-op (notice
-// unchanged). Clearing the spark grid keeps the knock baseline — a clear must
-// not manufacture a phantom delta on the next frame.
+// gridsHaveData reports whether any of the four grids currently holds samples.
+func (m tuiModel) gridsHaveData() bool {
+	return m.grid.TotalSamples() > 0 || m.intGrid.TotalSamples() > 0 ||
+		m.o2Grid.TotalSamples() > 0 || m.sparkGrid.TotalSamples() > 0
+}
+
+// unsaved reports whether the grids hold data not yet written by a Save Buffer.
+func (m tuiModel) unsaved() bool { return m.dirtyGrids && m.gridsHaveData() }
+
+// quitGuardMsg explains why a quit is being held and how to proceed.
+func (m tuiModel) quitGuardMsg() string {
+	switch {
+	case m.logActive() && m.unsaved():
+		return "logging active · unsaved grids — [q] again to quit · [s] save"
+	case m.logActive():
+		return "logging active — [q] again to quit · [l] stop"
+	default:
+		return "unsaved grids — [q] again to quit · [s] save"
+	}
+}
+
+// clear resets state for the active tab: the viewed grid (BLM/INT/O2/Spark) or,
+// on the sensor tab, the Min/Max extrema. Other tabs are a no-op. The cleared
+// value is retained for a one-slot undo ([u]). Clearing the spark grid keeps the
+// knock baseline — a clear must not manufacture a phantom delta on the next frame.
 func (m *tuiModel) clear() string {
+	m.canUndo, m.undoView = true, m.active
 	switch m.active {
 	case viewBLM:
-		m.grid = blm.NewDefault()
-		return "cleared BLM grid"
+		m.undoGrid, m.grid = m.grid, blm.NewDefault()
+		return "cleared BLM grid ([u] undo)"
 	case viewINT:
-		m.intGrid = blm.NewDefault()
-		return "cleared INT grid"
+		m.undoGrid, m.intGrid = m.intGrid, blm.NewDefault()
+		return "cleared INT grid ([u] undo)"
 	case viewO2:
-		m.o2Grid = blm.NewDefault()
-		return "cleared O2 grid"
+		m.undoGrid, m.o2Grid = m.o2Grid, blm.NewDefault()
+		return "cleared O2 grid ([u] undo)"
 	case viewSpark:
-		m.sparkGrid = blm.NewSpark()
-		return "cleared SPARK grid"
+		m.undoGrid, m.sparkGrid = m.sparkGrid, blm.NewSpark()
+		return "cleared SPARK grid ([u] undo)"
 	case viewSensors:
+		m.undoMins, m.undoMaxs = m.mins, m.maxs
 		m.mins, m.maxs, m.hasExtrema = map[string]float64{}, map[string]float64{}, false
-		return "reset min/max"
+		return "reset min/max ([u] undo)"
 	}
+	m.canUndo = false // nothing to clear on this tab
 	return m.notice
+}
+
+// undo restores the single retained clear ([u]); it assumes canUndo is set. The
+// restored data is live again, so the grids are marked dirty.
+func (m *tuiModel) undo() string {
+	name := "grid"
+	switch m.undoView {
+	case viewBLM:
+		m.grid, name = m.undoGrid, "BLM"
+	case viewINT:
+		m.intGrid, name = m.undoGrid, "INT"
+	case viewO2:
+		m.o2Grid, name = m.undoGrid, "O2"
+	case viewSpark:
+		m.sparkGrid, name = m.undoGrid, "SPARK"
+	case viewSensors:
+		m.mins, m.maxs = m.undoMins, m.undoMaxs
+		m.hasExtrema = len(m.mins) > 0
+		m.canUndo = false
+		return "restored min/max"
+	}
+	m.canUndo, m.dirtyGrids = false, true
+	return "restored " + name + " grid"
 }
 
 // defaultBase is the pre-filled base-name for the output picker: a timestamped
@@ -969,6 +1050,7 @@ func (m *tuiModel) confirmSaveBuffer(base string, sel []string) {
 		for _, g := range grids {
 			m.written = append(m.written, outputRecord{base + "_" + g.suffix + ".txt", ""})
 		}
+		m.dirtyGrids = false // grids are now on disk
 	}
 	if contains(sel, "csv") {
 		c, err := newFrameCSV(csvName, m.def)
