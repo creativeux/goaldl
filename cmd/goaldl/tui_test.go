@@ -886,8 +886,13 @@ func TestTUIQuitGuard(t *testing.T) {
 	if cmd1 != nil {
 		t.Error("first q on a dirty model should not quit")
 	}
-	if !m1.quitArmed || !strings.Contains(m1.notice, "unsaved") {
-		t.Errorf("first q should arm + notice, got armed=%v notice=%q", m1.quitArmed, m1.notice)
+	if !m1.quitArmed {
+		t.Error("first q on a dirty model should arm the quit confirm")
+	}
+	// The confirm is a centered modal, not a footer notice.
+	m1.width, m1.height = 60, 16
+	if v := m1.View(); !strings.Contains(v, "Quit?") || !strings.Contains(v, "unsaved") {
+		t.Errorf("armed view should show the confirm modal, got:\n%s", v)
 	}
 	if _, cmd2 := m1.Update(runes('q')); cmd2 == nil {
 		t.Error("second q should quit")

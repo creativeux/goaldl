@@ -477,8 +477,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Guard the quit when there is an open Log or unsaved grid data: the
 			// first q arms + explains, a second q quits. Clean state quits at once.
 			if !m.quitArmed && (m.logActive() || m.unsaved()) {
-				m.quitArmed = true
-				m.setNotice(m.quitGuardMsg())
+				m.quitArmed = true // View shows the confirm modal
 				return m, nil
 			}
 			m.cancel()
@@ -685,16 +684,31 @@ func (m tuiModel) gridsHaveData() bool {
 // unsaved reports whether the grids hold data not yet written by a Save Buffer.
 func (m tuiModel) unsaved() bool { return m.dirtyGrids && m.gridsHaveData() }
 
-// quitGuardMsg explains why a quit is being held and how to proceed.
-func (m tuiModel) quitGuardMsg() string {
+// quitGuardReason names what is at risk when a quit is held.
+func (m tuiModel) quitGuardReason() string {
 	switch {
 	case m.logActive() && m.unsaved():
-		return "logging active · unsaved grids — [q] again to quit · [s] save"
+		return "A log is recording and grids hold unsaved data."
 	case m.logActive():
-		return "logging active — [q] again to quit · [l] stop"
+		return "A log is still recording."
 	default:
-		return "unsaved grids — [q] again to quit · [s] save"
+		return "Grids hold unsaved data."
 	}
+}
+
+// confirmPanel is the centered quit-confirm modal shown while quitArmed — a
+// bordered dialog over an otherwise-cleared screen, so the blocking decision
+// isn't crowded into the footer. Keys are handled normally underneath (q quits,
+// s saves, anything else keeps working).
+func (m tuiModel) confirmPanel() string {
+	body := beatBad.Render("Quit?") + "\n\n" +
+		m.quitGuardReason() + "\n\n" +
+		dimStyle.Render("[q] quit  ·  [s] save  ·  any other key keeps working")
+	box := modalStyle.Render(body)
+	if w := m.contentWidth(); w > 0 && m.height > 0 {
+		return lipgloss.Place(w, m.height, lipgloss.Center, lipgloss.Center, box)
+	}
+	return box
 }
 
 // clear resets state for the active tab: the viewed grid (BLM/INT/O2/Spark) or,
@@ -1260,11 +1274,15 @@ var (
 	loopClosed  = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true) // green
 	loopOpen    = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true) // amber
 	brandStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")) // GoALDL logo (cyan; not reverse, so it doesn't read as a tab)
+	modalStyle  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("3")).Padding(1, 3)
 )
 
 func (m tuiModel) View() string {
 	if m.fatalErr != nil {
 		return m.padHeight(m.fitWidth(m.errorPanel()))
+	}
+	if m.quitArmed {
+		return m.padHeight(m.fitWidth(m.confirmPanel()))
 	}
 	// Grid tabs carry a per-grid accumulation dot (● accumulating / ○ frozen by
 	// loop gating), so which grids are learning reads straight off the tab bar —
