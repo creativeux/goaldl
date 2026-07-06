@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.2](https://github.com/creativeux/goaldl/compare/v0.1.1...v0.1.2) (2026-07-06)
+
+
+### Features
+
+* ship linux/armv6 and FreeBSD release binaries ([08cf396](https://github.com/creativeux/goaldl/commit/08cf396cf8d9400ead1706b404ea4291beb5d029))
+
+
+### Bug Fixes
+
+* detect CH340 adapters and BSD ports in the serial port list ([6f64041](https://github.com/creativeux/goaldl/commit/6f64041d0b8fa2b182a4fcfe150504e64caaa683))
+* enable virtual-terminal mode before ANSI redraws on Windows ([b6193f7](https://github.com/creativeux/goaldl/commit/b6193f730ec52b9d9b22608f76ddbf174b34845c))
+* exclude unintended freebsd/arm64 from the release matrix ([441d264](https://github.com/creativeux/goaldl/commit/441d2646ae7788f9ab736032f84f2686c37b1727))
+
 ## [0.1.1](https://github.com/creativeux/goaldl/compare/v0.1.0...v0.1.1) (2026-07-06)
 
 
