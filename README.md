@@ -19,7 +19,10 @@ operating range.
 ## What you need
 
 - **A compatible GM vehicle** with an ALDL port — usually a 12-pin connector
-  under the dash.
+  under the dash. Today goaldl decodes the **160-baud GM 1227747** ECM (mainly
+  ~1986–1993 GM TBI trucks/vans, 4.3/5.0/5.7 L). The broader 1980–1995 GM ALDL
+  range — other 160-baud ECMs and the 8192-baud generation — is on the roadmap;
+  see the [vehicle support matrix](docs/vehicle-support.md).
 - **A USB-to-ALDL cable** — an inverting adapter onto the ECM's data line. A
   Prolific PL2303 or a genuine FTDI FT232R both work. See
   [Platform support](#platform-support) for the driver each OS needs.
