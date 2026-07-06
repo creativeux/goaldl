@@ -1188,11 +1188,18 @@ func TestTUIReplayKeys(t *testing.T) {
 	_ = uc
 }
 
-// fakeBytes is a stub byteSource for the waiting-screen diagnostics (there is no
-// serial-port fake). Its counter is set directly by the test.
-type fakeBytes struct{ n int64 }
+// fakeBytes is a stub byteSource for the waiting-screen diagnostics and the
+// reconnect indicator (there is no serial-port fake). Its fields are set
+// directly by the test.
+type fakeBytes struct {
+	n            int64
+	reconnecting bool
+	attempt      int
+}
 
-func (f *fakeBytes) Bytes() int64 { return f.n }
+func (f *fakeBytes) Bytes() int64          { return f.n }
+func (f *fakeBytes) Reconnecting() bool    { return f.reconnecting }
+func (f *fakeBytes) ReconnectAttempt() int { return f.attempt }
 
 // TestWaitingDiagnostics: before the first frame on a live source, the waiting
 // screen tells "no bytes" (cable) from "bytes but no sync" (baud/polarity) with
@@ -1245,6 +1252,78 @@ func TestSerialBytes(t *testing.T) {
 	m2 := n2.(tuiModel)
 	if m2.bytesSeen != 318 || m2.byteRate != 159 {
 		t.Errorf("after tick 2: bytesSeen=%d rate=%d, want 318/159 (delta)", m2.bytesSeen, m2.byteRate)
+	}
+}
+
+// TestTUIReconnectIndicator: a brief mid-session drop shows the inline header
+// indicator (dashboard + grids stay visible, no fatal panel); once reconnected
+// it clears.
+func TestTUIReconnectIndicator(t *testing.T) {
+	m := testModel()
+	fb := &fakeBytes{reconnecting: true, attempt: 3} // ≤ reconnectEscalate → inline
+	m.serial = fb
+	m.hasFrame = true
+	m.hasGood = true
+	// Make it look stale too, so we prove reconnect takes precedence over "no data".
+	m.lastFrameAt = time.Unix(0, 0)
+	m.now = time.Unix(60, 0)
+	m.width, m.height = 100, 30
+
+	v := m.View()
+	if !strings.Contains(v, "reconnecting") {
+		t.Errorf("brief-drop view missing the inline indicator:\n%s", v)
+	}
+	if strings.Contains(v, "Waiting for") || strings.Contains(v, "lost") {
+		t.Error("a brief drop should stay on the dashboard, not the full waiting screen")
+	}
+	if strings.Contains(v, "no data") {
+		t.Error("reconnect indicator should stand in for the stale 'no data' text")
+	}
+	if m.fatalErr != nil {
+		t.Error("reconnecting must not set a fatal error")
+	}
+	// The dashboard chrome is still present (grids not lost), e.g. the tab bar.
+	if !strings.Contains(v, "BLM") {
+		t.Error("dashboard should stay visible during a brief drop")
+	}
+
+	fb.reconnecting = false
+	if strings.Contains(m.View(), "reconnecting") {
+		t.Error("indicator should clear once Reconnecting() is false")
+	}
+}
+
+// TestTUIWaitingForPort: the full waiting screen replaces the dashboard when a
+// live source is reconnecting and has either never connected (startup) or been
+// out long enough to escalate — but never sets a fatal error, and yields back to
+// the dashboard the moment a frame arrives.
+func TestTUIWaitingForPort(t *testing.T) {
+	// Startup: never seen a frame → "Waiting for" screen.
+	start := testModel()
+	start.serial = &fakeBytes{reconnecting: true, attempt: 1}
+	start.width, start.height = 100, 30
+	if v := start.View(); !strings.Contains(v, "Waiting for") {
+		t.Errorf("startup-with-no-port should show the waiting screen:\n%s", v)
+	}
+	if start.fatalErr != nil {
+		t.Error("waiting for a port is not a fatal error")
+	}
+
+	// Escalated mid-session outage: had a frame, attempt past the threshold →
+	// "Connection … lost" screen (grids preserved, not a fresh model).
+	lost := testModel()
+	lost.serial = &fakeBytes{reconnecting: true, attempt: reconnectEscalate + 1}
+	lost.hasFrame = true
+	lost.hasGood = true
+	lost.width, lost.height = 100, 30
+	if v := lost.View(); !strings.Contains(v, "lost") {
+		t.Errorf("prolonged outage should escalate to the full waiting screen:\n%s", v)
+	}
+
+	// Recovery: a frame arrives → back to the dashboard.
+	lost.serial = &fakeBytes{reconnecting: false}
+	if v := lost.View(); strings.Contains(v, "Waiting for") || strings.Contains(v, "Connection") {
+		t.Error("dashboard should return once reconnected")
 	}
 }
 
