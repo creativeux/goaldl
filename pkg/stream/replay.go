@@ -26,9 +26,17 @@ type ReplayProvider struct {
 	now   func() time.Time
 	sleep func(ctx context.Context, d time.Duration) error
 
+	// decodeOnce guards the one-time decode shared by Run and Duration, so the
+	// capture is never decoded twice and the two can never disagree on the frame
+	// list or total length.
+	decodeOnce sync.Once
+	frames     []decoder.Frame
+	total      time.Duration // data-timeline length (last frame's Elapsed)
+
 	mu     sync.Mutex
 	paused bool
-	speed  float64 // runtime override; 0 = unset, use Speed
+	speed  float64        // runtime override; 0 = unset, use Speed
+	seekTo *time.Duration // pending seek target, applied at the next frame boundary
 }
 
 // NewReplayProvider builds a replay provider at real-time speed.
@@ -77,6 +85,98 @@ func (p *ReplayProvider) CurrentSpeed() float64 {
 	return p.Speed
 }
 
+// frameElapsed maps a frame's byte offset to its data-timeline position — each
+// capture byte is one ALDL bit at 160 bps, so the offset is the position in the
+// original recording. This is what the consumer sees as Elapsed.
+func frameElapsed(f decoder.Frame) time.Duration {
+	return time.Duration(float64(f.ByteOffset) / 160.0 * float64(time.Second))
+}
+
+// ensureDecoded decodes the capture once (shared by Run and Duration) and caches
+// the frames plus the total length. Safe to call from either goroutine.
+func (p *ReplayProvider) ensureDecoded() {
+	p.decodeOnce.Do(func() {
+		p.frames = decoder.New(p.Config).Decode(p.Data)
+		if n := len(p.frames); n > 0 {
+			p.total = frameElapsed(p.frames[n-1])
+		}
+	})
+}
+
+// Duration returns the total data-timeline length of the capture (the last
+// frame's Elapsed), or 0 for an empty capture. The first call decodes the
+// capture once (O(n), cached and shared with Run via decodeOnce, so it is never
+// paid twice); subsequent calls are O(1). Callable before Run starts — the TUI
+// reads it once to size the position bar.
+func (p *ReplayProvider) Duration() time.Duration {
+	p.ensureDecoded()
+	return p.total
+}
+
+// Seek requests a jump to data-timeline position target (clamped to
+// [0, Duration]). The jump is applied at the next frame boundary in Run: the
+// pacing loop repositions the frame index and re-anchors so playback continues
+// from there at the current speed with no catch-up rush. A backward seek
+// re-emits the earlier frames. Safe to call concurrently with Run. No-op when
+// Speed is 0 (unpaced), consistent with SetPaused/SetSpeed being inert there.
+func (p *ReplayProvider) Seek(target time.Duration) {
+	if p.Speed <= 0 {
+		return
+	}
+	p.ensureDecoded()
+	if target < 0 {
+		target = 0
+	}
+	if target > p.total {
+		target = p.total
+	}
+	p.mu.Lock()
+	p.seekTo = &target
+	p.mu.Unlock()
+}
+
+// PendingSeek reports a requested-but-not-yet-applied seek target (mirrors
+// Paused/CurrentSpeed as a read accessor; used by the TUI's tests to confirm a
+// key issued the seek it should).
+func (p *ReplayProvider) PendingSeek() (time.Duration, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.seekTo == nil {
+		return 0, false
+	}
+	return *p.seekTo, true
+}
+
+// takeSeek returns a pending seek target once, clearing it.
+func (p *ReplayProvider) takeSeek() (time.Duration, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.seekTo == nil {
+		return 0, false
+	}
+	t := *p.seekTo
+	p.seekTo = nil
+	return t, true
+}
+
+// seekIndex returns the first frame index whose Elapsed is >= target, clamped to
+// a valid index. Frames are monotonic in ByteOffset, so a binary search suffices.
+func seekIndex(frames []decoder.Frame, target time.Duration) int {
+	lo, hi := 0, len(frames)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		if frameElapsed(frames[mid]) < target {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	if lo >= len(frames) {
+		lo = len(frames) - 1
+	}
+	return lo
+}
+
 func (p *ReplayProvider) controls() (paused bool, speed float64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -101,15 +201,15 @@ func (p *ReplayProvider) Run(ctx context.Context, emit func(FrameEvent)) error {
 		sleep = ctxSleep
 	}
 
-	frames := decoder.New(p.Config).Decode(p.Data)
+	p.ensureDecoded()
+	frames := p.frames
 	if p.Speed <= 0 {
-		// Unpaced: emit as fast as possible; runtime controls are inert.
+		// Unpaced: emit as fast as possible; runtime controls (incl. seek) are inert.
 		for i, f := range frames {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			dataElapsed := time.Duration(float64(f.ByteOffset) / 160.0 * float64(time.Second))
-			emit(FrameEvent{Frame: f, Index: i, Elapsed: dataElapsed})
+			emit(FrameEvent{Frame: f, Index: i, Elapsed: frameElapsed(f)})
 		}
 		return nil
 	}
@@ -121,15 +221,27 @@ func (p *ReplayProvider) Run(ctx context.Context, emit func(FrameEvent)) error {
 	anchorWall := now()
 	anchorData := time.Duration(0)
 	lastPaused, lastSpeed := p.controls()
-	for i, f := range frames {
+	for i := 0; i < len(frames); i++ {
+		f := frames[i]
 		// Each capture byte is one ALDL bit at 160 bps, so a frame's byte
 		// offset maps directly to its position in the original recording.
 		// This is what the consumer sees as Elapsed — the data timeline, not
 		// how long playback has been running — so it is independent of Speed.
-		dataElapsed := time.Duration(float64(f.ByteOffset) / 160.0 * float64(time.Second))
+		dataElapsed := frameElapsed(f)
 		for {
 			if err := ctx.Err(); err != nil {
 				return err
+			}
+			// A pending seek jumps the frame index and re-anchors, then emits the
+			// target frame immediately (even while paused, so a scrub shows the
+			// frame under the playhead) — playback then holds or paces from there.
+			if target, ok := p.takeSeek(); ok {
+				i = seekIndex(frames, target)
+				f = frames[i]
+				dataElapsed = frameElapsed(f)
+				anchorData = dataElapsed
+				anchorWall = now()
+				break
 			}
 			paused, speed := p.controls()
 			if paused != lastPaused || speed != lastSpeed {

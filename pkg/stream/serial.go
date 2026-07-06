@@ -3,6 +3,7 @@ package stream
 import (
 	"context"
 	"io"
+	"sync/atomic"
 	"time"
 
 	"goaldl/pkg/decoder"
@@ -17,9 +18,16 @@ type SerialProvider struct {
 	Baud   int
 	Config decoder.Config
 	Sink   io.Writer // optional: raw capture tee
+
+	nbytes atomic.Int64 // total raw bytes read (waiting-screen diagnostics; see Bytes)
 }
 
 func (p *SerialProvider) Name() string { return "live:" + p.Port }
+
+// Bytes returns the total raw bytes read from the port so far. The waiting
+// screen uses it to tell "no bytes at all" (cable/port/driver) from "bytes but
+// no frame sync" (baud/polarity). Safe to read concurrently with Run.
+func (p *SerialProvider) Bytes() int64 { return p.nbytes.Load() }
 
 func (p *SerialProvider) Run(ctx context.Context, emit func(FrameEvent)) error {
 	ser, err := serial.NewWithBaudRate(p.Port, p.Baud)
@@ -46,6 +54,7 @@ func (p *SerialProvider) Run(ctx context.Context, emit func(FrameEvent)) error {
 		if n == 0 {
 			continue // read timeout, no data yet
 		}
+		p.nbytes.Add(int64(n))
 		if p.Sink != nil {
 			if _, werr := p.Sink.Write(buf[:n]); werr != nil {
 				return werr

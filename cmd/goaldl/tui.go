@@ -20,6 +20,7 @@ import (
 	"goaldl/pkg/blm"
 	"goaldl/pkg/decoder"
 	"goaldl/pkg/ecm"
+	"goaldl/pkg/serial"
 	"goaldl/pkg/stream"
 )
 
@@ -109,6 +110,12 @@ func cmdTUI(args []string) {
 			fmt.Fprintln(os.Stderr, "No source. Give a port or a capture file:")
 			fmt.Fprintln(os.Stderr, "  goaldl -p /dev/cu.usbserial-10")
 			fmt.Fprintln(os.Stderr, "  goaldl drive_4800.raw")
+			if ports, perr := serial.AvailablePorts(); perr == nil && len(ports) > 0 {
+				fmt.Fprintf(os.Stderr, "\nDetected ports (pass one with -p, or run 'goaldl' on a terminal to pick):\n")
+				for _, p := range ports {
+					fmt.Fprintf(os.Stderr, "  %s\n", p)
+				}
+			}
 			fmt.Fprintln(os.Stderr, "\nSee 'goaldl help' for the scripting commands (ports, record, decode, blm, …).")
 		} else {
 			fmt.Fprintln(os.Stderr, err)
@@ -121,10 +128,12 @@ func cmdTUI(args []string) {
 	// space/+/- keys can pause and re-pace playback.
 	var provider stream.Provider
 	var replay *stream.ReplayProvider
+	var serial *stream.SerialProvider
 	var recSink *stream.RecordSink
 	if cfg.portName != "" {
 		recSink = &stream.RecordSink{}
-		provider = &stream.SerialProvider{Port: cfg.portName, Baud: cfg.cfg.BaudRate, Config: cfg.cfg, Sink: recSink}
+		serial = &stream.SerialProvider{Port: cfg.portName, Baud: cfg.cfg.BaudRate, Config: cfg.cfg, Sink: recSink}
+		provider = serial
 	} else {
 		data, err := os.ReadFile(cfg.inName)
 		if err != nil {
@@ -133,6 +142,10 @@ func cmdTUI(args []string) {
 		}
 		replay = &stream.ReplayProvider{Data: data, Config: cfg.cfg, Speed: cfg.speed}
 		provider = replay
+	}
+	var replayTotal time.Duration
+	if replay != nil {
+		replayTotal = replay.Duration() // capture length for the position bar
 	}
 
 	def := cfg.def
@@ -161,21 +174,25 @@ func cmdTUI(args []string) {
 	}()
 
 	m := tuiModel{
-		def:        def,
-		minSamples: cfg.minSamples,
-		source:     session.Name(),
-		snaps:      snaps,
-		errCh:      errCh,
-		cancel:     cancel,
-		replay:     replay,
-		recSink:    recSink,
-		grid:       blm.NewDefault(),
-		intGrid:    blm.NewDefault(),
-		o2Grid:     blm.NewDefault(),
-		sparkGrid:  blm.NewSpark(),
-		buf:        newFrameBuf(),
-		mins:       map[string]float64{},
-		maxs:       map[string]float64{},
+		def:         def,
+		minSamples:  cfg.minSamples,
+		source:      session.Name(),
+		snaps:       snaps,
+		errCh:       errCh,
+		cancel:      cancel,
+		replay:      replay,
+		replayTotal: replayTotal,
+		recSink:     recSink,
+		grid:        blm.NewDefault(),
+		intGrid:     blm.NewDefault(),
+		o2Grid:      blm.NewDefault(),
+		sparkGrid:   blm.NewSpark(),
+		buf:         newFrameBuf(),
+		mins:        map[string]float64{},
+		maxs:        map[string]float64{},
+	}
+	if serial != nil {
+		m.serial = serial // guarded: a nil *SerialProvider must not become a non-nil interface
 	}
 	final, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	cancel()
@@ -340,16 +357,23 @@ const (
 	knockFreeFrac   = 0.5
 )
 
+// byteSource is the live raw-byte counter the waiting screen samples for its
+// cable-vs-config diagnostic. Satisfied by *stream.SerialProvider; an interface
+// so tests can stub it (there is no serial-port fake). nil on a replay source.
+type byteSource interface{ Bytes() int64 }
+
 type tuiModel struct {
 	// config / wiring
-	def        *ecm.Definition
-	minSamples int
-	source     string
-	snaps      <-chan stream.Snapshot
-	errCh      <-chan error // session's terminal error, read when snaps closes
-	cancel     context.CancelFunc
-	replay     *stream.ReplayProvider // pause/speed handle (nil when live)
-	recSink    *stream.RecordSink     // raw-capture tee (nil when replay)
+	def         *ecm.Definition
+	minSamples  int
+	source      string
+	snaps       <-chan stream.Snapshot
+	errCh       <-chan error // session's terminal error, read when snaps closes
+	cancel      context.CancelFunc
+	replay      *stream.ReplayProvider // pause/speed/seek handle (nil when live)
+	replayTotal time.Duration          // capture length, read once (0 when live)
+	serial      byteSource             // live raw-byte counter for diagnostics (nil when replay)
+	recSink     *stream.RecordSink     // raw-capture tee (nil when replay)
 
 	// state
 	width, height int
@@ -398,6 +422,15 @@ type tuiModel struct {
 	// staleAfter is flagged stale (hollow heartbeat + footer age).
 	lastFrameAt time.Time
 	now         time.Time
+
+	// live byte diagnostics (waiting screen, D.3): bytesSeen is the running total
+	// read from m.serial.Bytes(), sampled on the tick; byteRate is the delta over
+	// the last tick. The tick is 1s (see tick()), so byteRate reads as B/s — if the
+	// tick cadence ever changes, divide by its period before labelling it a rate.
+	// Used only before the first frame syncs, to tell "no bytes at all" (cable)
+	// from "bytes but no sync" (baud/polarity).
+	bytesSeen int64
+	byteRate  int64
 
 	// free-running-knock detection: a sliding window over parsed frames records
 	// whether each had a nonzero KNOCK_CNT delta. A high fraction means the
@@ -551,11 +584,22 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.replay.SetPaused(!m.replay.Paused())
 		case "+", "=":
-			cmd := m.adjustSpeed(2)
+			cmd := m.adjustSpeed(true)
 			return m, cmd
 		case "-":
-			cmd := m.adjustSpeed(0.5)
+			cmd := m.adjustSpeed(false)
 			return m, cmd
+		case ",":
+			cmd := m.seekBy(-seekStep)
+			return m, cmd
+		case ".":
+			cmd := m.seekBy(seekStep)
+			return m, cmd
+		case "0":
+			if cmd := m.replayGuard(); cmd != nil {
+				return m, cmd
+			}
+			m.replay.Seek(0) // restart
 		}
 		if m.active != prevActive {
 			m.scroll = 0 // a fresh tab starts at the top
@@ -622,6 +666,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.now = time.Time(msg)
+		if m.serial != nil {
+			// Sample the raw byte counter so the waiting screen can show a rate.
+			b := m.serial.Bytes()
+			m.byteRate = b - m.bytesSeen
+			m.bytesSeen = b
+		}
 		if m.done {
 			return m, nil // stream ended — stop the idle staleness timer
 		}
@@ -1210,15 +1260,64 @@ func (m *tuiModel) replayGuard() tea.Cmd {
 	return nil
 }
 
-// adjustSpeed scales the replay rate by factor, clamped to 0.25×–16×.
-func (m *tuiModel) adjustSpeed(factor float64) tea.Cmd {
+// speedSteps are the discrete replay-speed stops the [±] keys move between. A
+// fixed ladder (rather than a ×2/÷2 factor) guarantees that stepping down from
+// an off-ladder start rate (e.g. -speed 5) still lands on 1× — halving 5 never
+// would.
+var speedSteps = []float64{0.25, 0.5, 1, 2, 4, 8, 16}
+
+// adjustSpeed moves the replay rate to the next ladder stop above (up) or below
+// the current rate, clamped to the ladder ends. An off-ladder current rate steps
+// to the nearest stop in that direction.
+func (m *tuiModel) adjustSpeed(up bool) tea.Cmd {
 	if cmd := m.replayGuard(); cmd != nil {
 		return cmd
 	}
-	v := m.replay.CurrentSpeed() * factor
-	v = math.Max(0.25, math.Min(16, v))
+	cur := m.replay.CurrentSpeed()
+	const eps = 1e-9
+	var v float64
+	if up {
+		v = speedSteps[len(speedSteps)-1] // stay at max if already at/above it
+		for _, s := range speedSteps {
+			if s > cur+eps {
+				v = s
+				break
+			}
+		}
+	} else {
+		v = speedSteps[0] // stay at min if already at/below it
+		for i := len(speedSteps) - 1; i >= 0; i-- {
+			if speedSteps[i] < cur-eps {
+				v = speedSteps[i]
+				break
+			}
+		}
+	}
 	m.replay.SetSpeed(v)
 	// No notice — the legend's [±] speed (N×) reflects the change live.
+	return nil
+}
+
+// seekStep is the ±jump for the [,]/[.] replay keys.
+const seekStep = 10 * time.Second
+
+// seekBy jumps replay by d from the current position, clamped to the capture
+// length. Grids and the frame ring are NOT rewound on a backward seek — they are
+// whole-session aggregates, not a timeline, so a re-played frame re-accumulates
+// (consistent with the [c] clear semantics); [c] is the reset. No notice — the
+// [,/.] position readout in the playback row reflects the jump live.
+func (m *tuiModel) seekBy(d time.Duration) tea.Cmd {
+	if cmd := m.replayGuard(); cmd != nil {
+		return cmd
+	}
+	target := m.latest.Elapsed + d
+	if target < 0 {
+		target = 0
+	}
+	if target > m.replayTotal {
+		target = m.replayTotal
+	}
+	m.replay.Seek(target)
 	return nil
 }
 
@@ -1344,7 +1443,12 @@ func (m tuiModel) View() string {
 	// is running) the REC clock, then any transient notice. Loop state and the
 	// elapsed clock are intentionally omitted (loop state still reads off the tab
 	// dots). The mode badge isn't here: live is unbadged; replay's leads its row.
-	status := dimStyle.Render("Signal:") + " " + m.signalDot()
+	status := ""
+	if m.replay != nil {
+		// Replay position leads the status block, left of Signal.
+		status += dimStyle.Render(m.replayPosition()) + "   "
+	}
+	status += dimStyle.Render("Signal:") + " " + m.signalDot()
 	if m.done {
 		status += "   " + dimStyle.Render("(stream ended)")
 	}
@@ -1433,13 +1537,30 @@ func (m tuiModel) fitWidth(s string) string {
 	return strings.Join(lines, "\n")
 }
 
+// waitingBody is the pre-first-frame screen. On a replay it's the bare wait
+// (frames are momentary at the very start). On a live source it turns the raw
+// byte counter into a diagnostic: no bytes at all points at the physical layer
+// (cable / port / driver); bytes arriving with no frame sync points at the
+// decode config (baud / polarity), with the rate shown so a number near the
+// known-good ~159 B/s idle strongly implies polarity/baud.
+func (m tuiModel) waitingBody() string {
+	if m.serial == nil {
+		return dimStyle.Render("\n  waiting for frames…")
+	}
+	if m.bytesSeen == 0 {
+		return beatWarn.Render("\n  waiting for frames…  no bytes yet — check cable / port / driver")
+	}
+	return beatWarn.Render(fmt.Sprintf(
+		"\n  waiting for frame sync…  %d B/s, no sync — check baud (-b) / polarity (-invert)", m.byteRate))
+}
+
 // activeBody renders the current tab's content (no chrome). The grid tabs honour
 // the info accordion (m.showInfo); the Spark tab also carries the free-running
 // warning verdict.
 func (m tuiModel) activeBody() string {
 	switch {
 	case !m.hasFrame:
-		return dimStyle.Render("\n  waiting for frames…")
+		return m.waitingBody()
 	case m.active == viewRaw:
 		return m.rawView()
 	case !m.hasGood:
@@ -1501,7 +1622,18 @@ func (m tuiModel) keyLegend() string {
 // the live legend — replay is a rare advanced/debug mode, so its keys are added
 // rather than displacing the live chrome.
 func (m tuiModel) replayNav() string {
-	return dimStyle.Render("(Replay)  [space] pause · " + m.speedLabel())
+	return dimStyle.Render("[space] pause · " + m.speedLabel() + " · [,/.] ±10s · [0] restart")
+}
+
+// replayPosition renders the playback position as `m:ss / m:ss (N%)`. Percent
+// guards a zero total (empty/one-frame capture).
+func (m tuiModel) replayPosition() string {
+	pos := m.latest.Elapsed
+	pct := 0
+	if m.replayTotal > 0 {
+		pct = int(float64(pos) / float64(m.replayTotal) * 100)
+	}
+	return fmt.Sprintf("%s / %s (%d%%)", formatElapsed(pos), formatElapsed(m.replayTotal), pct)
 }
 
 // formatElapsed renders a stream position as m:ss (or h:mm:ss past an hour).
