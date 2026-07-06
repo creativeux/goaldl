@@ -1,6 +1,7 @@
 # goaldl
 
 [![CI](https://github.com/creativeux/goaldl/actions/workflows/ci.yml/badge.svg)](https://github.com/creativeux/goaldl/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/creativeux/goaldl?logo=github)](https://github.com/creativeux/goaldl/releases/latest)
 
 **goaldl** reads live data from GM's pre-OBD2 diagnostic port — the 160-baud
 ALDL (Assembly Line Diagnostic Link) stream — and shows it on an interactive
