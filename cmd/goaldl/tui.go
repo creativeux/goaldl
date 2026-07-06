@@ -1491,15 +1491,16 @@ func (m tuiModel) View() string {
 	if m.notice != "" {
 		status += "   " + m.notice
 	}
-	// Title bar: GoALDL flush left, the status block flush right.
-	brand := brandStyle.Render("GoALDL")
+	// Title bar: GoALDL + the build version flush left, the status block flush
+	// right.
+	left := brandStyle.Render("GoALDL") + " " + dimStyle.Render(versionShort())
 	gap := 3
 	if w := m.contentWidth(); w > 0 {
-		if g := w - ansi.StringWidth(brand) - ansi.StringWidth(status); g > gap {
+		if g := w - ansi.StringWidth(left) - ansi.StringWidth(status); g > gap {
 			gap = g
 		}
 	}
-	titleBar := brand + strings.Repeat(" ", gap) + status
+	titleBar := left + strings.Repeat(" ", gap) + status
 
 	// Grid tabs carry a per-grid accumulation dot (● accumulating / ○ frozen by
 	// loop gating), so which grids are learning reads straight off the tab bar.
