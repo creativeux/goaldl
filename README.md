@@ -11,6 +11,8 @@ reads the 160-baud stream through an ordinary USB serial adapter and produces
 correct frames — verified against a WinALDL ground-truth log and a real drive
 capture (635/635 frames with matching PROM ID across the full operating range).
 
+![GoALDL dashboard demo](docs/goaldl-demo.gif)
+
 ## How it works, in one paragraph
 
 The ALDL line idles high and encodes each bit as the *width* of a low pulse
