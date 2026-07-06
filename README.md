@@ -32,6 +32,23 @@ go run ./cmd/goaldl        # or run directly; prints available commands
 Or download a prebuilt binary for your platform from the
 [Releases](https://github.com/creativeux/goaldl/releases) page.
 
+### macOS: allow the downloaded binary
+
+The prebuilt binaries are not yet code-signed or notarized, so macOS Gatekeeper
+blocks a freshly downloaded copy — *"Apple could not verify 'goaldl' is free of
+malware…"*. This is the quarantine flag macOS adds to anything downloaded from a
+browser, not a problem with the binary. Clear it once, then run:
+
+```bash
+xattr -d com.apple.quarantine ./goaldl   # or: xattr -cr ./goaldl
+./goaldl
+```
+
+Alternatively, right-click the binary in Finder and choose **Open**, or after a
+blocked launch open **System Settings → Privacy &amp; Security** and click **Open
+Anyway**. Building from source (`go build ./cmd/goaldl`) or `go install` avoids
+this entirely, since a locally built binary is never quarantined.
+
 ## Releases &amp; versioning
 
 Every binary self-reports its build: `goaldl version` (or `--version`). Released
