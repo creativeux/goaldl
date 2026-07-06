@@ -18,6 +18,9 @@ standards:
   - path: release/versioning.md
     area: release
     summary: Conventional Commits drive release-please semver + GoReleaser binaries; version embedded via ldflags.
+  - path: release/platform-support.md
+    area: release
+    summary: Tiered OS/arch support matrix (core/best-effort/embedded); platform code stays confined to pkg/serial and the VT seam.
 reference:
   - path: sda-standard-v1.md
     area: sda

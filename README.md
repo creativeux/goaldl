@@ -49,6 +49,31 @@ blocked launch open **System Settings → Privacy &amp; Security** and click **O
 Anyway**. Building from source (`go build ./cmd/goaldl`) or `go install` avoids
 this entirely, since a locally built binary is never quarantined.
 
+## Platform support
+
+goaldl is pure Go (no CGO), so one codebase builds for everything below. The
+full tiered matrix, including the embedded story, lives in
+[`product-knowledge/standards/release/platform-support.md`](product-knowledge/standards/release/platform-support.md).
+
+**Core (built, tested, supported):**
+
+| Platform | Arch | Minimum OS | Serial-adapter driver |
+|---|---|---|---|
+| macOS | Apple Silicon + Intel | macOS 12 | Prolific "PL2303 Serial" app from the App Store (pre-2012/counterfeit PL2303HXA chips are driver-blocked); FTDI works out of the box |
+| Windows | x64 | Windows 10 | Auto-installs via Windows Update |
+| Linux | x64, arm64 | kernel ≥ 3.2 (static binary — glibc, musl/Alpine, anything) | `pl2303` is in every mainstream kernel; add yourself to the `dialout` (Debian/Ubuntu/Pi OS) or `uucp` (Arch) group to open the port |
+
+**Best-effort (binaries ship with every release, not hand-tested):**
+Raspberry Pi 3/4/5 use the standard linux-arm64 build (the TUI works over
+SSH); a linux-armv6 build covers Pi Zero/1/2 on 32-bit Pi OS. Windows arm64
+ships too, but Prolific's ARM64 driver support is spotty — prefer an FTDI
+adapter there. FreeBSD amd64 works via the in-base `uplcom(4)` driver
+(ports show up as `/dev/cuaU*`).
+
+Microcontrollers (Arduino-class boards via TinyGo, Particle) are not release
+targets — see the matrix doc for what a TinyGo port of the decoder core would
+take.
+
 ## Releases &amp; versioning
 
 Every binary self-reports its build: `goaldl version` (or `--version`). Released
