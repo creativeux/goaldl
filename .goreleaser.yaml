@@ -1,0 +1,52 @@
+# GoReleaser builds the cross-platform binaries attached to each GitHub Release.
+# Run locally with `goreleaser release --snapshot --clean` to dry-run.
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: goaldl
+    main: ./cmd/goaldl
+    binary: goaldl
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # Inject the version metadata read back by cmd/goaldl/version.go.
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - id: goaldl
+    formats: [tar.gz]
+    # Windows users expect a zip.
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+# release-please already generates the human-facing changelog + release notes,
+# so keep GoReleaser's own changelog out of the release body.
+changelog:
+  disable: true
+
+release:
+  # release-please creates the GitHub Release; GoReleaser only uploads to it.
+  mode: append

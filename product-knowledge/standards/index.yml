@@ -15,6 +15,9 @@ standards:
   - path: go/tooling.md
     area: go
     summary: gofmt + vet + build + test -race is the whole gate; minimal dependencies.
+  - path: release/versioning.md
+    area: release
+    summary: Conventional Commits drive release-please semver + GoReleaser binaries; version embedded via ldflags.
 reference:
   - path: sda-standard-v1.md
     area: sda
