@@ -5,6 +5,7 @@
 package serial
 
 import (
+	"strings"
 	"time"
 
 	"go.bug.st/serial"
@@ -66,32 +67,40 @@ func (s *AldlSerial) ResetInputBuffer() error {
 }
 
 // AvailablePorts lists serial ports that look like USB-to-serial adapters,
-// across Linux (/dev/ttyUSB*, /dev/ttyACM*), Windows (COM*), and macOS
-// (/dev/cu.* for common chipsets).
+// across Linux (/dev/ttyUSB*, /dev/ttyACM*), Windows (COM*), macOS
+// (/dev/cu.* for common chipsets), and the BSDs (/dev/cuaU*).
 func AvailablePorts() ([]string, error) {
 	ports, err := serial.GetPortsList()
 	if err != nil {
 		return nil, errors.WrapSerialPort(err, "failed to list ports")
 	}
+	return filterUSBPorts(ports), nil
+}
 
+// macOS /dev/cu.<name> prefixes for common USB-serial chipsets.
+var cuUSBPrefixes = []string{
+	"PL2303-",      // Prolific PL2303 (vendor driver)
+	"usbserial",    // Prolific PL2303 (DriverKit app), FTDI
+	"SLAB",         // Silicon Labs CP210x
+	"wchusbserial", // WCH CH340/CH341
+	"usbmodem",     // CDC-ACM devices
+}
+
+// filterUSBPorts keeps the port names that look like USB-to-serial adapters.
+func filterUSBPorts(ports []string) []string {
 	var usbPorts []string
 	for _, port := range ports {
-		isUSB := false
+		isUSB := strings.HasPrefix(port, "/dev/ttyUSB") || // Linux USB-serial
+			strings.HasPrefix(port, "/dev/ttyACM") || // Linux CDC-ACM
+			strings.HasPrefix(port, "COM") || // Windows
+			strings.HasPrefix(port, "/dev/cuaU") // FreeBSD/OpenBSD USB-serial
 
-		if len(port) >= 11 && (port[:11] == "/dev/ttyUSB" || port[:11] == "/dev/ttyACM") {
-			isUSB = true
-		}
-		if len(port) >= 3 && port[:3] == "COM" {
-			isUSB = true
-		}
-		if len(port) >= 8 && port[:8] == "/dev/cu." {
-			name := port[8:]
-			if len(name) >= 7 && name[:7] == "PL2303-" ||
-				len(name) >= 9 && name[:9] == "usbserial" ||
-				len(name) >= 4 && name[:4] == "SLAB" || // Silicon Labs CP210x
-				len(name) >= 5 && name[:5] == "wchusbserial" || // CH340
-				len(name) >= 8 && name[:8] == "usbmodem" {
-				isUSB = true
+		if name, ok := strings.CutPrefix(port, "/dev/cu."); ok {
+			for _, prefix := range cuUSBPrefixes {
+				if strings.HasPrefix(name, prefix) {
+					isUSB = true
+					break
+				}
 			}
 		}
 
@@ -99,5 +108,5 @@ func AvailablePorts() ([]string, error) {
 			usbPorts = append(usbPorts, port)
 		}
 	}
-	return usbPorts, nil
+	return usbPorts
 }
