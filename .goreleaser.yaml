@@ -12,13 +12,26 @@ builds:
     binary: goaldl
     env:
       - CGO_ENABLED=0
+    # Tier 1 + Tier 2 of the support matrix
+    # (product-knowledge/standards/release/platform-support.md).
     goos:
       - darwin
       - linux
       - windows
+      - freebsd
     goarch:
       - amd64
       - arm64
+      - arm # 32-bit Raspberry Pi (Zero/1/2, 32-bit Pi OS)
+    goarm:
+      - "6"
+    ignore:
+      - goos: darwin
+        goarch: arm
+      - goos: windows
+        goarch: arm
+      - goos: freebsd
+        goarch: arm
     # Inject the version metadata read back by cmd/goaldl/version.go.
     ldflags:
       - -s -w
