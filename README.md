@@ -97,4 +97,11 @@ goaldl simulate -n 200 && goaldl aldl_sim_4800.raw   # synthetic stream
 
 ## License
 
-GPL-3.0 (maintains compatibility with the original rustaldl project).
+Copyright 2026 Aaron Stone. Released under the
+[PolyForm Noncommercial License 1.0.0](LICENSE): free to use, modify, and share
+for any **noncommercial** purpose — personal projects, hobby use, research,
+education, and nonprofits.
+
+**Commercial use** — selling goaldl, or a product or service built on it —
+requires a separate commercial license from the author. If that's you, get in
+touch.
