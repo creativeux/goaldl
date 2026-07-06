@@ -1,5 +1,9 @@
 # Usage
 
+> The examples below call `goaldl` directly, which assumes it's on your PATH
+> (see [Install](../README.md#install)). If it isn't, run it by its path
+> instead — e.g. `./goaldl` from the folder that contains it.
+
 `goaldl` is two things in one binary:
 
 - **The dashboard** — the interactive terminal UI you get by running `goaldl`
