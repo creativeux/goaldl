@@ -69,4 +69,5 @@ standard is in `product-knowledge/standards/release/versioning.md`.
 The full tiered platform matrix (core / best-effort / non-targets) and the
 embedded-microcontroller story live in
 [`../product-knowledge/standards/release/platform-support.md`](../product-knowledge/standards/release/platform-support.md).
-User-facing driver notes per OS are in [Usage → Hardware & drivers](usage.md#hardware--drivers).
+The supported-platform matrix and per-OS driver notes are in the
+[README → Platform support](../README.md#platform-support).

@@ -21,8 +21,7 @@ operating range.
   under the dash.
 - **A USB-to-ALDL cable** — an inverting adapter onto the ECM's data line. A
   Prolific PL2303 or a genuine FTDI FT232R both work. See
-  [Hardware & drivers](docs/usage.md#hardware--drivers) for the driver each OS
-  needs.
+  [Platform support](#platform-support) for the driver each OS needs.
 
 ## Install
 
@@ -83,6 +82,27 @@ save fuel-trim grids, record the session, and more.
 ```bash
 goaldl simulate -n 200 && goaldl aldl_sim_4800.raw   # synthetic stream
 ```
+
+## Platform support
+
+goaldl is pure Go (no CGO), so one codebase builds for everything below.
+
+**Core** — built, tested, and supported:
+
+| Platform | Arch | Minimum OS | Serial-adapter driver |
+|---|---|---|---|
+| macOS | Apple Silicon + Intel | macOS 12 | Prolific's "PL2303 Serial" app from the App Store (pre-2012/counterfeit PL2303HXA chips are driver-blocked); FTDI works out of the box |
+| Windows | x64 | Windows 10 | Auto-installs via Windows Update |
+| Linux | x64, arm64 | kernel ≥ 3.2 | `pl2303` ships in every mainstream kernel; add yourself to the `dialout` (Debian/Ubuntu/Pi OS) or `uucp` (Arch) group to open the port |
+
+**Best-effort** — binaries ship with every release, but aren't hand-tested:
+Raspberry Pi 3/4/5 use the standard linux-arm64 build (the dashboard works over
+SSH); a linux-armv6 build covers Pi Zero/1/2. Windows arm64 ships too, but
+Prolific's ARM64 driver support is spotty — prefer FTDI there. FreeBSD amd64
+works via the in-base `uplcom(4)` driver.
+
+The full tiered matrix and the embedded/microcontroller story are in
+[`product-knowledge/standards/release/platform-support.md`](product-knowledge/standards/release/platform-support.md).
 
 ## Documentation
 
