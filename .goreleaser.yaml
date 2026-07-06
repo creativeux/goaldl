@@ -32,6 +32,8 @@ builds:
         goarch: arm
       - goos: freebsd
         goarch: arm
+      - goos: freebsd
+        goarch: arm64 # Tier 2 covers freebsd/amd64 only
     # Inject the version metadata read back by cmd/goaldl/version.go.
     ldflags:
       - -s -w
