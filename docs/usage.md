@@ -84,22 +84,8 @@ You need:
 - **A USB-to-ALDL cable** — an inverting level converter onto the UART RX line.
   A Prolific **PL2303** or a genuine FTDI **FT232R** both work.
 
-Driver notes by OS:
-
-| Platform | Arch | Minimum OS | Serial-adapter driver |
-|---|---|---|---|
-| macOS | Apple Silicon + Intel | macOS 12 | Prolific's "PL2303 Serial" app from the App Store (pre-2012/counterfeit PL2303HXA chips are driver-blocked); FTDI works out of the box |
-| Windows | x64 | Windows 10 | Auto-installs via Windows Update |
-| Linux | x64, arm64 | kernel ≥ 3.2 | `pl2303` is in every mainstream kernel; add yourself to the `dialout` (Debian/Ubuntu/Pi OS) or `uucp` (Arch) group to open the port |
-
-**Best-effort targets** (binaries ship with every release, not hand-tested):
-Raspberry Pi 3/4/5 use the standard linux-arm64 build (the dashboard works over
-SSH); a linux-armv6 build covers Pi Zero/1/2. Windows arm64 ships too, but
-Prolific's ARM64 driver support is spotty — prefer FTDI there. FreeBSD amd64
-works via the in-base `uplcom(4)` driver.
-
-The full tiered platform matrix and the embedded/microcontroller story live in
-[`../product-knowledge/standards/release/platform-support.md`](../product-knowledge/standards/release/platform-support.md).
+For the driver each OS needs (and the supported-platform matrix), see
+[Platform support](../README.md#platform-support).
 
 ## References
 
