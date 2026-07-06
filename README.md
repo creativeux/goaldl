@@ -29,6 +29,27 @@ go build ./cmd/goaldl      # build
 go run ./cmd/goaldl        # or run directly; prints available commands
 ```
 
+Or download a prebuilt binary for your platform from the
+[Releases](https://github.com/creativeux/goaldl/releases) page.
+
+## Releases &amp; versioning
+
+Every binary self-reports its build: `goaldl version` (or `--version`). Released
+builds carry a semantic version + commit; a plain `go build` from source falls
+back to the VCS revision the Go toolchain stamps in.
+
+Versioning is automated from [Conventional Commits](https://www.conventionalcommits.org):
+
+- Commit with `feat:` / `fix:` / `feat!:` (breaking) prefixes on `main`.
+- [release-please](https://github.com/googleapis/release-please) keeps an open
+  "release PR" that bumps the version and updates `CHANGELOG.md`. Merging it
+  tags `vX.Y.Z` and cuts a GitHub Release.
+- [GoReleaser](https://goreleaser.com) then builds the macOS/Linux/Windows
+  (amd64 + arm64) binaries — version baked in via ldflags — and attaches them to
+  that release. Dry-run locally with `goreleaser release --snapshot --clean`.
+
+Pre-1.0, breaking changes bump the minor (never 1.0) per the config.
+
 ## Commands
 
 `goaldl` itself is the **interactive dashboard** — tab between sensors, the BLM

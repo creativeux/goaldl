@@ -41,6 +41,9 @@ func main() {
 		case "ecms":
 			cmdECMs()
 			return
+		case "version", "-v", "--version":
+			cmdVersion()
+			return
 		case "help", "-h", "--help":
 			printUsage()
 			return
@@ -79,6 +82,7 @@ func printUsage() {
 	fmt.Println("  simulate   Generate a synthetic capture for testing decode")
 	fmt.Println("  ports      List available USB serial ports")
 	fmt.Println("  ecms       List supported ECM part numbers")
+	fmt.Println("  version    Print the build version")
 	fmt.Println()
 	fmt.Println("Examples:")
 	fmt.Println("  goaldl ports")
