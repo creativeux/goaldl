@@ -245,3 +245,76 @@ Gate decision: **PROCEED to implement-feature** (suggested slice 1 = C.0 outputs
   - Verify: `go test -race ./...` green; `go vet` + `gofmt` clean; decoder goldens byte-identical; `blm` 469; forbidden-seam diff empty.
 - 2026-07-05: **Quit confirm → centered modal (user: inline footer felt crowded).** The C.2 quit guard now renders as a **bordered dialog centered over a cleared screen** (`confirmPanel` via `lipgloss` border + `lipgloss.Place`, new `modalStyle`; no new dependency — same pattern as `errorPanel`), rather than a footer notice. `View` short-circuits to it while `quitArmed`; key handling underneath is unchanged (`q` quits, `s` saves, any other key cancels). `quitGuardMsg`→`quitGuardReason` (prose for the dialog). `TestTUIQuitGuard` asserts the `Quit?` modal is shown when armed. `-race` green; gofmt/vet clean; `blm` 469; seam empty.
 - 2026-07-05: **Unified modal presentation (user): clear + save dialogs as modals too.** Generalized the quit modal into a single confirm mechanism and moved the picker into a modal, so all three dialogs are centered bordered boxes (`modal()` helper; neutral gray border, title colour conveys type). **C.3 changed from one-slot undo to confirm-before-clear** (supersedes `[u]`, matches quit): `confirmKind` (None/Quit/Clear) replaces `quitArmed` + the undo fields; first `c`/`q` opens the modal, a second of the same key carries it out, any other key cancels (then acts). The **output picker now renders via `modal(pickerView())`** (short-circuit in `View`, its key hints moved inside the box; dead activeBody/footer picker branches removed). `undo()`/`[u]` removed. Tests reworked: `TestTUIQuitGuard` (confirm state), `TestTUIClearUndo`→`TestTUIClearConfirm` (arm/second-c/cancel/nothing-to-clear), `doClear` helper for the other clear-based tests. `-race` green; gofmt/vet clean; `blm` 469; seam empty.
+
+## Phase D — Replay & startup ergonomics (spec-feature, 2026-07-05)
+
+### Resume Trace
+- Session resumed 2026-07-05 via `/glados:spec-feature` on the **TUI UX Pass** epic. Phases A/B/C specced+shipped; Phase D (replay & startup, F6/F7/F8) and Phase E (learnability) remained unspecced. User chose **Phase D**. Re-read `requirements.md` (F6/F7/F8, success criteria 6/7/8) + `plan.md` Phase D + open decisions #3; grounded in `pkg/stream/replay.go`, `serial.go`, `record.go`, `cmd/goaldl/main.go` + `tui.go` (replayNav/sessionChrome/activeBody/launchTUI).
+
+### Clarifying decisions (user, 2026-07-05)
+1. **D.2 port discovery** → **in-TUI picker** (waiting/picker state on 0 or 2+ ports; re-polls on the existing 1 s tick; ↑/↓ + Enter connects), not error-text-only.
+2. **D.1 backward seek** → **grids/extrema left as-is** (re-emitted frames re-accumulate; grids are session aggregates not a timeline; `c` still clears). Documented.
+3. **D.1 seek keys** → `,`/`.` ±10 s, `0` restart (no ±60 s tier).
+
+### Detailed Specification
+- Created [spec-phaseD.md](spec-phaseD.md). Three loosely-coupled slices, all keyed to the operator's first minutes:
+  - **D.1 replay position + seek** — provider `ReplayProvider.Duration()` (cached one-time decode shared with `Run`) + `Seek(target)` (applied at frame boundary, re-anchors like pause/speed, no-op when `Speed==0`); consumer `m.replayTotal`, `seekBy` through `replayGuard`, `,`/`.`/`0` keys, `t=m:ss / total (N%)` in `replayNav`.
+  - **D.2 port picker** — `launchTUI` routes bare `goaldl` + not-exactly-1-port into a pre-session `portPicker` (option (a): a tiny first Bubble Tea program returns the chosen port, then the existing live-setup block runs — session wiring stays in one place); stdlib char-device TTY guard falls back to improved `errNoTUISource` (now lists detected ports) when headless.
+  - **D.3 byte diagnostics** — `SerialProvider.nbytes atomic.Int64` + `Bytes()` (mirrors `RecordSink.Bytes()`); consumer holds a typed `m.serial` handle, samples on the tick, and the `!hasFrame` waiting screen splits *no bytes → cable/port* vs *bytes, no sync → baud/polarity* with a `B/s` rate. Composes with A.1 (open failed) / A.2 (went quiet) as three non-overlapping failure windows.
+- **Architectural note**: Phase D makes the epic's only remaining **below-facade** additions — provider methods on `ReplayProvider`/`SerialProvider` (the same seam parity Phase 3 used for `RecordSink`/pause-speed). `Session`/`Snapshot`/`ecm`/`decoder`/`blm` untouched; `Snapshot` gains no field; decode path byte-identical; `blm` still 469. Forbidden-seam diff for Phase D is `session.go`/`stream.go`/`ecm`/`decoder`/`blm`/`go.mod`/`go.sum` empty; `pkg/stream` changes confined to `replay.go`+`serial.go`.
+
+### Review (Persona-based, reviewing the Specification)
+- **Architect** (architecture/standards/performance): APPROVE (pending fix). Fits the layering standard (provider-below-facade, Session/Snapshot untouched, explicitly enumerated). One-time `Duration()` decode cache avoids double-decode; atomic counter is contention-free. **C1**: original headless guard used `x/term` — a possible new direct dep breaking the "`go.sum` unchanged" claim. → **Fixed**: switched to stdlib `os.Stdin.Stat()` char-device check.
+- **Product Manager** (user-value/scope/requirements): APPROVE. Each slice maps to F6/F7/F8 + success criteria 6/7/8; non-goals fence out seek-scrub/±60 s/hot-reconnect/config. Picker is in-scope per criterion 7 ("or offers an in-TUI picker") and the user's explicit choice — not creep.
+- **QA** (testing/edge-cases/regression): APPROVE (with note). Strong unhappy-path coverage (clamp, seek-while-paused, unpaced, live-warn, 0-ports-forever, unplug-race, non-TTY, garbage-bytes, slow-trickle); 6 named tests + regression. **C3**: `TestSerialBytes` was conditioned on a nonexistent serial fake. → **Fixed**: made it non-optional at the model level via the same stub as `TestWaitingDiagnostics`.
+- **Synthesis**: all three approve; both actionable notes (C1, C3) folded into the spec.
+
+### Standards Gate Report (pre-implementation)
+| Standard | Scope | Severity | Verdict |
+|---|---|---|---|
+| architecture/session-api-layering | architecture | must | ✅ PASSES — additions are provider methods below the facade; Session/Snapshot/ecm/decoder/blm untouched; no new parallel path |
+| decoder/raw-data-policy | decoder | must | ✅ PASSES — no decode-path change; D.3 byte count is a diagnostic field alongside (not a filter); seek re-emits frames, grids keep them |
+| decoder/byte-value-decoding | decoder | must | ✅ PASSES (N/A) — no decode logic touched |
+| go/tooling | go | should | ✅ PASSES — test plan is the exact CI gate; new-dep risk (x/term) resolved to stdlib |
+| testing/golden-fixtures | testing | should | ✅ PASSES — goldens byte-identical asserted; model tests on the drive fixture; blm 469 |
+| release/versioning | release | may | ℹ️ NOTE — implementation commits use Conventional Commits (feat: per slice) |
+- **Philosophy cross-check** (`consolidate-over-accrete`, `ground-truth-first`, both Confirmed): ✅ no conflict. New capability grows on the existing providers (not a parallel engine); D.2 option (a) reuses the one session-construction path rather than duplicating it; D.3's 159 B/s figure and all tests anchor to the real drive fixture / hardware-validated rate.
+- **Gate decision: PROCEED** — no `must` violation, no core-philosophy conflict.
+
+### Handoff
+- Spec ready. Suggested slices: **1** D.1 replay seek, **2** D.3 byte diagnostics, **3** D.2 port picker (largest; ship last on a stable base). Next: `/glados:implement-feature` on spec-phaseD.md (or `/glados:plan-feature` if re-scoping). Phase E (learnability) remains the last unspecced phase of this epic.
+
+## Phase D — Replay & startup ergonomics (implement-feature, 2026-07-05)
+- **Branch**: `feat/tui-phase-d` off `main` (Phase C slice 1+2 already merged: `8083168`, `8f0d654`). Task breakdown: [tasks-phaseD.md](tasks-phaseD.md) — 3 slices, 15 tasks, all ✅.
+- **Active capabilities**: local Go toolchain (build/vet/test -race) as the gate; headless model-render smoke via a throwaway `_test.go` (confirmed replayNav / waitingBody / port-picker output by eye). No browser/DB/PM tools relevant.
+
+### Slice 1 — D.1 replay position + seek (D1–D6)
+- `pkg/stream/replay.go` (below-facade provider): `ensureDecoded()` caches the one-time decode (`frames`+`total`) shared by `Run` and the new `Duration()`; `Seek(target)` clamps to `[0,total]`, no-op when `Speed==0`, sets a mutex-guarded `seekTo` applied at the frame boundary in `Run` (binary-search `seekIndex`, reposition index, re-anchor, `break` to emit the target frame immediately — even while paused). `PendingSeek()` read accessor added for the TUI tests (mirrors `Paused()`/`CurrentSpeed()`). `frameElapsed` helper factored out.
+- `cmd/goaldl/tui.go`: `replayTotal` (from `Duration()`), `seekBy(d)` through `replayGuard` (clamps to `replayTotal`; doc-comments that grids/ring are NOT rewound on backward seek — session aggregates, `c` resets), `,`/`.`/`0` keys, and `replayNav`/`replayPosition` → `(Replay)  t=m:ss / m:ss (N%)  [space] pause · [±] speed (N×) · [,/.] ±10s · [0] restart`.
+- Tests: `TestReplaySeek` (forward jump, backward re-emit, clamp-past-end, seek-while-paused-holds, unpaced-inert) + `TestReplayDuration`; `TestTUISeekKeys` (clamped ±10s/restart via `PendingSeek`, position string, live+unpaced warn). One self-inflicted test bug found+fixed: the seek-while-paused subtest re-issued `Seek` every sleep slice (bounced playback at frame 200 → 10-min timeout); fixed to seek once via `p.Paused()`.
+
+### Slice 2 — D.3 waiting-screen byte diagnostics (D7–D10)
+- `pkg/stream/serial.go` (below-facade): `nbytes atomic.Int64` + `Bytes()`; `nbytes.Add(n)` after each non-zero `Read`.
+- `cmd/goaldl/tui.go`: `m.serial byteSource` (small `interface{ Bytes() int64 }` — refined from the spec's concrete `*SerialProvider` so the QA-approved "stub provider" test plan is realizable with no serial fake; assignment guarded against the typed-nil-in-interface trap). `bytesSeen`/`byteRate` sampled on the 1 s `tickMsg`; `waitingBody()` splits `no bytes yet — check cable / port / driver` (bytesSeen==0) from `NNN B/s, no sync — check baud (-b) / polarity (-invert)`; replay renders the bare wait.
+- Tests: `TestWaitingDiagnostics` (cable vs sync hint vs bare replay vs gone-once-frame) + `TestSerialBytes` (tick sampling + per-tick rate) via a `fakeBytes` stub.
+
+### Slice 3 — D.2 port discovery UX (D11–D14)
+- `cmd/goaldl/portpicker.go` (new): a small standalone `portPicker` Bubble Tea model (injectable `list` func) — `Update` re-polls on a 1 s `portTickMsg`, auto-connects when the count drops to exactly 1, `enter` returns the highlighted port, `q`/`ctrl+c` return "" (clean decline); `View` shows the port list + cursor (2+), or a retry + PL2303-driver hint (0), or the scan error. `runPortPicker` runs it to completion; `stdinIsInteractive()` = stdlib `os.Stdin.Stat()` char-device check (no `x/term` dep, per the persona-review C1 fix).
+- `cmd/goaldl/main.go`: `launchTUI` — bare `goaldl` + port count ≠ 1 + interactive stdin → run the picker first, chosen port re-enters `cmdTUI` with `-p`; "" → exit 0; non-interactive → fall through. `errNoTUISource` stderr now lists detected ports.
+- Tests: `TestPortPicker` (2-port render + clamped cursor, Enter→chosen, drop-to-1 auto-connect, 0-port retry+driver hint, scan-error surfaced, q→clean decline).
+
+### Verify (D15 — the exact CI gate + seam guards)
+- `go test -race -count=1 ./...` **green** (all 5 packages); `go vet ./...` + `gofmt -l pkg cmd` **clean**.
+- Decoder goldens **byte-identical** (`TestGolden`, no `-update`) — decode path untouched. `blm` command still **469** over `drive_4800.raw`.
+- **Forbidden-seam diff EMPTY** (`pkg/stream/session.go`, `pkg/stream/stream.go`, `pkg/ecm`, `pkg/decoder`, `pkg/blm`, `go.mod`, `go.sum`). `pkg/stream` changes confined to **`replay.go` + `serial.go`** (+ `stream_test.go`). `Snapshot`/`Session` gained no field.
+- Visual smoke (headless render): replay nav `t=6:52 / 13:44 (50%) …`, both waiting-screen hints, and the 2-port picker all render as specified.
+
+### Pattern observations (pattern-observer)
+- No new enforceable standard or philosophy — Phase D reinforced two existing ones. **architecture/session-api-layering**: the below-facade additions (`ReplayProvider.Seek`/`Duration`, `SerialProvider.Bytes`) landed on the *providers*, leaving `Session`/`Snapshot` untouched (seam diff empty) — the same seam parity Phase 3 used for `RecordSink`/pause-speed, now applied a third time; the pattern "runtime provider controls go below the facade, never as a Snapshot field" is well-established (candidate to fold into the layering standard's examples at a future recombobulate, not urgent). **consolidate-over-accrete**: the port picker reused `cmdTUI`'s single session-construction path (option (a): resolve the port, then re-enter) rather than duplicating channel/cancel/recSink wiring into a lazy in-model start. One spec→impl refinement worth noting: the concrete `*SerialProvider` handle became a 1-method `byteSource` interface purely for testability (no serial fake exists) — a small, faithful reading of the QA-approved test plan, logged here so verify-feature sees it was deliberate.
+
+## Phase D — verify-feature (2026-07-05)
+- **Evaluation brief**: [evaluation-brief-phaseD.md](evaluation-brief-phaseD.md) (Sections A–F assembled from requirements F6/F7/F8 + success criteria 6/7/8/11, spec-phaseD.md, the diff vs `main`, verify+seam commands, 4 standards, 3 personas).
+- **Fresh evaluator** (context-isolated general-purpose agent, filesystem-only handoff) → [evaluation-phaseD.md](evaluation-phaseD.md): **PASS — 10/10 acceptance criteria, no blocking issues.** Full gate green (gofmt/vet/build/`test -race`); goldens byte-identical (no `-update`); `blm` 469; forbidden-seam diff empty; only the three allowed below-facade provider methods added; no new dependency (stdlib TTY check). Evaluator independently confirmed the flagged risks: typed-nil-interface guard holds, forward seek skips intermediates + re-anchors without rush/stall, port picker doesn't hang a non-TTY invocation. Two **note-level** observations only (no defect): `byteRate` "B/s" label couples to the 1s tick; `Duration()` "O(1)" wording vs its first-call O(n) cached decode — **both tidied** (doc/comment clarifications in `tui.go` + `replay.go`; re-gated green).
+- **Spec retrospection**: recorded 4 divergences into [spec-phaseD.md](spec-phaseD.md) (all user follow-ons / testability, all PASS'd): position readout moved to the header + `t=`/`(Replay)` dropped; `+`/`-` fixed speed ladder; `m.serial` as a `byteSource` interface; `PendingSeek()` accessor. Standards audit: no standard's code examples reference Phase D-modified code — nothing stale to update.
+- **Test synchronization**: full `go test -race ./...` green; gofmt+vet clean; no stale module refs; `fakeBytes`/injected-lister fakes match real semantics; all 4 new public methods (`Duration`/`Seek`/`PendingSeek`/`Bytes`) covered; sibling parity with the pause/speed control + output-picker modal confirmed.
+- **Verdict: Phase D COMPLETE & verified.** Working tree uncommitted on `feat/tui-phase-d`.
