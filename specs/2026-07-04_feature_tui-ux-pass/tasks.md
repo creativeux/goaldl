@@ -46,11 +46,11 @@ Implementation checklist for [spec-phaseC.md](spec-phaseC.md). Consumer/presenta
 
 ## Slice 2 — C.1–C.4 session safety
 
-- [ ] **C11** `cmd/goaldl/tui.go`: C.1 dirty tracking — `dirtyGrids` set in `accumulate`, cleared on grid-inclusive Save Buffer; `logging` derived (recFile/csvLog open). Ring is NOT dirty (documented).
-- [ ] **C12** `cmd/goaldl/tui.go`: C.2 quit guard — `quitArmed`; first `q` while `logging||dirtyGrids` arms + notice (no quit); second `q` quits; other key disarms; `ctrl+c` still immediate.
-- [ ] **C13** `cmd/goaldl/tui.go`: C.3 clear undo — `undoGrid`/`undoView`/`undoMins`/`undoMaxs`; `clear()` stashes; `u` restores + re-dirties; one slot; notice `… (u to undo)`.
-- [ ] **C14** `cmd/goaldl/tui.go`: C.4 exit summary — `written []outputRecord`; pure `sessionSummary()`; `cmdTUI` prints after teardown (≥1 frame); notice-lifecycle doc comments on `setNotice`/`warn`.
-- [ ] **C15** `cmd/goaldl/tui_test.go`: `TestQuitGuard`, `TestClearUndo`, `TestExitSummary`, `TestNoticeClasses`.
+- [x] **C11** `cmd/goaldl/tui.go`: C.1 dirty tracking — `dirtyGrids` set in `accumulate`, cleared on grid-inclusive Save Buffer; `logging` derived (recFile/csvLog open). Ring is NOT dirty (documented).
+- [x] **C12** `cmd/goaldl/tui.go`: C.2 quit guard — `quitArmed`; first `q` while `logging||dirtyGrids` arms + notice (no quit); second `q` quits; other key disarms; `ctrl+c` still immediate.
+- [x] **C13** `cmd/goaldl/tui.go`: C.3 clear undo — `undoGrid`/`undoView`/`undoMins`/`undoMaxs`; `clear()` stashes; `u` restores + re-dirties; one slot; notice `… (u to undo)`.
+- [~] **C14** (exit summary DESCOPED per user 2026-07-05; notice-lifecycle already documented) `cmd/goaldl/tui.go`: C.4 exit summary — `written []outputRecord`; pure `sessionSummary()`; `cmdTUI` prints after teardown (≥1 frame); notice-lifecycle doc comments on `setNotice`/`warn`.
+- [x] **C15** `cmd/goaldl/tui_test.go`: `TestQuitGuard`, `TestClearUndo`, `TestExitSummary`, `TestNoticeClasses`.
 
 ## Verify
 - [x] **C16** `go test -race -count=1 ./...` green; `go vet` + `gofmt -l pkg cmd` clean; decoder goldens byte-identical (no `-update`); `blm` still 469 over `drive_4800.raw`; forbidden-seam diff (`pkg/stream/session.go`, `pkg/stream/stream.go`, `pkg/ecm`, `pkg/decoder`, `pkg/blm`, `go.mod`, `go.sum`) **empty**.

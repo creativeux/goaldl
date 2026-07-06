@@ -205,6 +205,15 @@ func calibratedDef(def *ecm.Definition, tps0, tps100 float64) *ecm.Definition {
 	return def.WithTPSCalibration(tps0, tps100)
 }
 
+// confirmKind is the pending destructive-action confirmation (a two-press modal).
+type confirmKind int
+
+const (
+	confirmNone confirmKind = iota
+	confirmQuit
+	confirmClear
+)
+
 type view int
 
 const (
@@ -360,21 +369,29 @@ type tuiModel struct {
 	hasKnockBase  bool               // first parsed frame only sets the baseline
 	mins, maxs    map[string]float64 // per-sensor extrema since last reset
 	hasExtrema    bool
-	notice        string         // transient footer message after a save/clear
-	noticeSeq     int            // bumped on every notice change; guards expiry timers
-	picker        *outputPicker  // modal output checklist (nil when inactive)
-	buf           *frameBuf      // always-on decoded-frame ring for Save Buffer
-	written       []outputRecord // files written this session (exit summary)
-	recFile       *os.File       // open raw-capture target (nil when not logging raw)
-	recName       string
-	csvLog        *frameCSV // open CSV log (nil when not logging CSV)
-	csvName       string
-	logBase       string        // base path for the active Log's grid snapshot (at stop)
-	logGridIDs    []string      // grids selected for the active Log, written when it stops
-	logStartAt    time.Duration // frame-timeline position when the active Log started (for the REC clock)
-	frameCount    int
-	done          bool
-	fatalErr      error // session's terminal error (nil = clean end / user quit)
+
+	// session safety (C.1–C.3): dirtyGrids is set when a grid accumulates and
+	// cleared by a grid-inclusive Save Buffer; confirm is the pending destructive-
+	// action modal (quit or clear), armed by the first keypress and carried out by
+	// a second of the same key.
+	dirtyGrids bool
+	confirm    confirmKind
+
+	notice     string         // transient footer message after a save/clear
+	noticeSeq  int            // bumped on every notice change; guards expiry timers
+	picker     *outputPicker  // modal output checklist (nil when inactive)
+	buf        *frameBuf      // always-on decoded-frame ring for Save Buffer
+	written    []outputRecord // files written this session (exit summary)
+	recFile    *os.File       // open raw-capture target (nil when not logging raw)
+	recName    string
+	csvLog     *frameCSV // open CSV log (nil when not logging CSV)
+	csvName    string
+	logBase    string        // base path for the active Log's grid snapshot (at stop)
+	logGridIDs []string      // grids selected for the active Log, written when it stops
+	logStartAt time.Duration // frame-timeline position when the active Log started (for the REC clock)
+	frameCount int
+	done       bool
+	fatalErr   error // session's terminal error (nil = clean end / user quit)
 
 	// staleness (live only): lastFrameAt is when the newest snapshot arrived;
 	// now is advanced by the 1s tick. A live stream that has gone quiet for
@@ -452,8 +469,38 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		prevActive := m.active
-		switch msg.String() {
-		case "ctrl+c", "q":
+		key := msg.String()
+		// A pending confirm modal (quit/clear): ctrl+c always quits, the confirm's
+		// own key carries out the action, and any other key cancels it — then falls
+		// through so that key still does its normal job.
+		if m.confirm != confirmNone {
+			switch {
+			case key == "ctrl+c":
+				m.cancel()
+				return m, tea.Quit
+			case m.confirm == confirmQuit && key == "q":
+				m.cancel()
+				return m, tea.Quit
+			case m.confirm == confirmClear && key == "c":
+				m.confirm = confirmNone
+				m.setNotice(m.clear())
+				return m, nil
+			default:
+				m.confirm = confirmNone // cancel; the key is handled below
+			}
+		}
+		switch key {
+		case "ctrl+c":
+			m.cancel() // the unconditional escape hatch
+			return m, tea.Quit
+		case "q":
+			// Guard the quit when there is an open Log or unsaved grid data: the
+			// first q opens the confirm modal, a second q quits. Clean state quits
+			// at once.
+			if m.logActive() || m.unsaved() {
+				m.confirm = confirmQuit // View shows the confirm modal
+				return m, nil
+			}
 			m.cancel()
 			return m, tea.Quit
 		case "1":
@@ -488,7 +535,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "s":
 			m.openSaveBuffer()
 		case "c":
-			m.setNotice(m.clear())
+			// Confirm before clearing (a modal, like quit); a no-op with a notice
+			// on tabs / empty grids that have nothing to clear.
+			if m.clearable() {
+				m.confirm = confirmClear
+				return m, nil
+			}
+			return m, m.warn("nothing to clear")
 		case "l":
 			cmd := m.toggleLog() // sequence the mutation before reading m
 			return m, cmd
@@ -611,6 +664,7 @@ func (m *tuiModel) accumulate(s stream.Snapshot) {
 	ft := s.FuelTrim
 	if ft.Recordable() {
 		m.grid.Add(ft.RPM, ft.MapKPa, ft.BLM)
+		m.dirtyGrids = true
 	}
 	if !s.ParseOK {
 		return
@@ -619,6 +673,7 @@ func (m *tuiModel) accumulate(s stream.Snapshot) {
 		m.intGrid.Add(ft.RPM, ft.MapKPa, s.Sensors["integrator"])
 	}
 	m.o2Grid.Add(ft.RPM, ft.MapKPa, s.Sensors["oxygen_sensor"]/1000.0)
+	m.dirtyGrids = true // O2 accumulates on every parseable frame
 	// Spark bins per-frame deltas of the cumulative KNOCK_CNT byte (wraps at
 	// 255). The first parsed frame only establishes the baseline — WinALDL
 	// counts knocks during the session, not the counter's absolute value.
@@ -642,10 +697,98 @@ func (m *tuiModel) accumulate(s stream.Snapshot) {
 	m.hasExtrema = true
 }
 
-// clear resets state for the active tab: the viewed grid (BLM/INT/O2/Spark)
-// or, on the sensor tab, the Min/Max extrema. Other tabs are a no-op (notice
-// unchanged). Clearing the spark grid keeps the knock baseline — a clear must
-// not manufacture a phantom delta on the next frame.
+// gridsHaveData reports whether any of the four grids currently holds samples.
+func (m tuiModel) gridsHaveData() bool {
+	return m.grid.TotalSamples() > 0 || m.intGrid.TotalSamples() > 0 ||
+		m.o2Grid.TotalSamples() > 0 || m.sparkGrid.TotalSamples() > 0
+}
+
+// unsaved reports whether the grids hold data not yet written by a Save Buffer.
+func (m tuiModel) unsaved() bool { return m.dirtyGrids && m.gridsHaveData() }
+
+// quitGuardReason names what is at risk when a quit is held.
+func (m tuiModel) quitGuardReason() string {
+	switch {
+	case m.logActive() && m.unsaved():
+		return "A log is recording and grids hold unsaved data."
+	case m.logActive():
+		return "A log is still recording."
+	default:
+		return "Grids hold unsaved data."
+	}
+}
+
+// confirmPanel is the centered destructive-action modal (quit or clear) shown
+// while m.confirm is set — a bordered dialog over an otherwise-cleared screen, so
+// the blocking decision isn't crowded into the footer. Keys are handled normally
+// underneath (the confirm key carries out the action, anything else cancels).
+func (m tuiModel) confirmPanel() string {
+	var title, reason, keys string
+	switch m.confirm {
+	case confirmClear:
+		title = "Clear " + m.clearTarget() + "?"
+		reason = "This can't be undone."
+		keys = "[c] clear  ·  any other key cancels"
+	default: // confirmQuit
+		title = "Quit?"
+		reason = m.quitGuardReason()
+		keys = "[q] quit  ·  [s] save  ·  any other key keeps working"
+	}
+	body := beatBad.Render(title) + "\n\n" + reason + "\n\n" + dimStyle.Render(keys)
+	return m.modal(body)
+}
+
+// modal renders content as a bordered box centered over the frame area.
+func (m tuiModel) modal(body string) string {
+	box := modalStyle.Render(body)
+	if w := m.contentWidth(); w > 0 && m.height > 0 {
+		return lipgloss.Place(w, m.height, lipgloss.Center, lipgloss.Center, box)
+	}
+	return box
+}
+
+// clearSpec describes what [c] clears on a tab: the legend label, the modal
+// target name, and whether the tab currently holds anything to clear. It is the
+// single source for clearLabel/clearTarget/clearable; clear() below performs the
+// matching reset — keep the two in sync when adding a clearable tab.
+type clearSpec struct {
+	label  string
+	target string
+	has    func(tuiModel) bool
+}
+
+func clearSpecFor(v view) (clearSpec, bool) {
+	switch v {
+	case viewBLM:
+		return clearSpec{"[c] clear BLM", "BLM grid", func(m tuiModel) bool { return m.grid.TotalSamples() > 0 }}, true
+	case viewINT:
+		return clearSpec{"[c] clear INT", "INT grid", func(m tuiModel) bool { return m.intGrid.TotalSamples() > 0 }}, true
+	case viewO2:
+		return clearSpec{"[c] clear O2", "O2 grid", func(m tuiModel) bool { return m.o2Grid.TotalSamples() > 0 }}, true
+	case viewSpark:
+		return clearSpec{"[c] clear SPARK", "SPARK grid", func(m tuiModel) bool { return m.sparkGrid.TotalSamples() > 0 }}, true
+	case viewSensors:
+		return clearSpec{"[c] reset min/max", "sensor min/max", func(m tuiModel) bool { return m.hasExtrema }}, true
+	}
+	return clearSpec{}, false // flags/codes/raw: nothing to clear
+}
+
+// clearTarget names what [c] clears on the active tab (for the confirm modal);
+// "" only on non-clearable tabs, which never reach the modal (clearable gates it).
+func (m tuiModel) clearTarget() string {
+	s, _ := clearSpecFor(m.active)
+	return s.target
+}
+
+// clearable reports whether the active tab has something to clear.
+func (m tuiModel) clearable() bool {
+	s, ok := clearSpecFor(m.active)
+	return ok && s.has(m)
+}
+
+// clear resets state for the active tab: the viewed grid (BLM/INT/O2/Spark) or,
+// on the sensor tab, the Min/Max extrema. Clearing the spark grid keeps the knock
+// baseline — a clear must not manufacture a phantom delta on the next frame.
 func (m *tuiModel) clear() string {
 	switch m.active {
 	case viewBLM:
@@ -969,6 +1112,7 @@ func (m *tuiModel) confirmSaveBuffer(base string, sel []string) {
 		for _, g := range grids {
 			m.written = append(m.written, outputRecord{base + "_" + g.suffix + ".txt", ""})
 		}
+		m.dirtyGrids = false // grids are now on disk
 	}
 	if contains(sel, "csv") {
 		c, err := newFrameCSV(csvName, m.def)
@@ -1178,11 +1322,18 @@ var (
 	loopClosed  = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true) // green
 	loopOpen    = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true) // amber
 	brandStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")) // GoALDL logo (cyan; not reverse, so it doesn't read as a tab)
+	modalStyle  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("8")).Padding(1, 3)
 )
 
 func (m tuiModel) View() string {
 	if m.fatalErr != nil {
 		return m.padHeight(m.fitWidth(m.errorPanel()))
+	}
+	if m.confirm != confirmNone {
+		return m.padHeight(m.fitWidth(m.confirmPanel()))
+	}
+	if m.picker != nil {
+		return m.padHeight(m.fitWidth(m.modal(m.pickerView())))
 	}
 	// Grid tabs carry a per-grid accumulation dot (● accumulating / ○ frozen by
 	// loop gating), so which grids are learning reads straight off the tab bar —
@@ -1233,19 +1384,10 @@ func (m tuiModel) View() string {
 	header := titleBar + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, rendered...)
 
 	keys := m.keyLegend() // already per-segment styled
-	if m.picker != nil {
-		keys = dimStyle.Render("[↑↓] move · [space] toggle · type edits dir/name · [enter] confirm · [esc] cancel")
-	}
-	// Bottom bar: (replay only) a playback-nav row, then the live legend. The
-	// playback row is blank while the picker is open (the picker owns [space]) so
-	// the frame height stays fixed per mode — matches chromeHeight.
+	// Bottom bar: (replay only) a playback-nav row, then the live legend.
 	var footerRows []string
 	if m.replay != nil {
-		nav := ""
-		if m.picker == nil {
-			nav = m.replayNav()
-		}
-		footerRows = append(footerRows, nav)
+		footerRows = append(footerRows, m.replayNav())
 	}
 	footerRows = append(footerRows, keys)
 	footer := strings.Join(footerRows, "\n")
@@ -1296,8 +1438,6 @@ func (m tuiModel) fitWidth(s string) string {
 // warning verdict.
 func (m tuiModel) activeBody() string {
 	switch {
-	case m.picker != nil:
-		return m.pickerView()
 	case !m.hasFrame:
 		return dimStyle.Render("\n  waiting for frames…")
 	case m.active == viewRaw:
@@ -1377,22 +1517,11 @@ func formatElapsed(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", m, s)
 }
 
-// clearLabel names what [c] clears on the active tab (the grid, or the sensor
-// min/max), or "" where clear is a no-op (flags/codes/raw) so [c] is hidden.
+// clearLabel names what [c] clears on the active tab for the footer legend, or
+// "" where clear is a no-op (flags/codes/raw) so [c] is hidden.
 func (m tuiModel) clearLabel() string {
-	switch m.active {
-	case viewBLM:
-		return "[c] clear BLM"
-	case viewINT:
-		return "[c] clear INT"
-	case viewO2:
-		return "[c] clear O2"
-	case viewSpark:
-		return "[c] clear SPARK"
-	case viewSensors:
-		return "[c] reset min/max"
-	}
-	return ""
+	s, _ := clearSpecFor(m.active)
+	return s.label
 }
 
 // speedLabel is the replay playback-speed hint carrying the current speed; 0
@@ -1538,12 +1667,12 @@ func (m tuiModel) sessionChrome() string {
 // directory (F17), and any transient hint (e.g. a name collision).
 func (m tuiModel) pickerView() string {
 	p := m.picker
-	title := "Save Buffer — pick outputs (from the frame buffer)"
+	title := "Save Buffer — pick outputs"
 	if p.op == opLog {
-		title = "Log — pick outputs (streams to disk from now on)"
+		title = "Log — pick outputs (streams to disk)"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n  %s\n\n", title)
+	fmt.Fprintf(&b, "%s\n\n", brandStyle.Render(title))
 	for i, it := range p.items {
 		box := "[ ]"
 		if it.on {
@@ -1555,10 +1684,10 @@ func (m tuiModel) pickerView() string {
 		}
 		if it.disabled {
 			// Dimmed with the reason — visible but not selectable.
-			fmt.Fprintf(&b, "%s\n", dimStyle.Render(fmt.Sprintf("  %s%s %s (%s)", cur, box, it.label, it.note)))
+			fmt.Fprintf(&b, "%s\n", dimStyle.Render(fmt.Sprintf("%s%s %s (%s)", cur, box, it.label, it.note)))
 			continue
 		}
-		fmt.Fprintf(&b, "  %s%s %s\n", cur, box, it.label)
+		fmt.Fprintf(&b, "%s%s %s\n", cur, box, it.label)
 	}
 	// Two editable path fields; the caret ▌ marks whichever the cursor is on.
 	field := func(row int, label, val string) string {
@@ -1566,13 +1695,14 @@ func (m tuiModel) pickerView() string {
 		if p.cursor == row {
 			cur, caret = "▸ ", "▌"
 		}
-		return fmt.Sprintf("  %s%s %s%s\n", cur, label, val, caret)
+		return fmt.Sprintf("%s%s %s%s\n", cur, label, val, caret)
 	}
 	b.WriteString("\n" + field(p.dirRow(), "dir: ", p.dir))
 	b.WriteString(field(p.nameRow(), "name:", p.name))
 	if p.hint != "" {
-		fmt.Fprintf(&b, "\n  %s\n", beatBad.Render(p.hint))
+		fmt.Fprintf(&b, "\n%s\n", beatBad.Render(p.hint))
 	}
+	b.WriteString("\n" + dimStyle.Render("[↑↓] move · [space] toggle · [enter] confirm · [esc] cancel"))
 	return b.String()
 }
 
