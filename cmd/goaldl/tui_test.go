@@ -1255,6 +1255,17 @@ func TestSerialBytes(t *testing.T) {
 	}
 }
 
+// TestTUIHeaderVersion: the title bar shows the build version next to GoALDL.
+func TestTUIHeaderVersion(t *testing.T) {
+	m := testModel()
+	m.hasFrame, m.hasGood = true, true
+	m.width, m.height = 86, 26
+	head := strings.SplitN(m.View(), "\n", 2)[0]
+	if !strings.Contains(head, "GoALDL") || !strings.Contains(head, versionShort()) {
+		t.Errorf("title bar %q should show GoALDL and the version %q", head, versionShort())
+	}
+}
+
 // TestTUIReconnectIndicator: a brief mid-session drop shows the inline header
 // indicator (dashboard + grids stay visible, no fatal panel); once reconnected
 // it clears.
