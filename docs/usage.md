@@ -1,8 +1,8 @@
 # Usage
 
-> The examples below call `goaldl` directly, which assumes it's on your PATH
-> (see [Install](../README.md#install)). If it isn't, run it by its path
-> instead — e.g. `./goaldl` from the folder that contains it.
+> The examples below write the command as `goaldl` for brevity. Run it however
+> suits you — `./goaldl` from its folder, `go run ./cmd/goaldl` from a source
+> checkout, or `goaldl` if it's on your PATH. See [Install](../README.md#install).
 
 `goaldl` is two things in one binary:
 
