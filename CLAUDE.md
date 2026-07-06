@@ -31,7 +31,7 @@ Releases are automated from the commit history — **do not tag, bump versions, 
 
 - **Commits on `main` MUST be [Conventional Commits](https://www.conventionalcommits.org)** (`feat:` / `fix:` / `feat!:` or a `BREAKING CHANGE:` footer; `chore:`/`docs:`/`refactor:`/`test:`/`ci:`/`build:` don't cut a release on their own). The type drives the semver bump. Pre-1.0 the config bumps a *patch* for `feat:` and only bumps the *minor* for a breaking change (never auto-`1.0.0`).
 - **release-please** (`.github/workflows/release.yml`, `release-please-config.json`, `.release-please-manifest.json`) keeps an open "release PR" that bumps the version + updates `CHANGELOG.md`; merging it tags `vX.Y.Z` and cuts a GitHub Release.
-- **GoReleaser** (`.goreleaser.yaml`) then builds macOS/Linux/Windows × amd64/arm64 binaries with the version injected via `-ldflags -X main.*` and appends them to that release. Dry-run: `goreleaser release --snapshot --clean`.
+- **GoReleaser** (`.goreleaser.yaml`) then builds the release binaries (macOS/Linux/Windows × amd64/arm64, plus best-effort linux/armv6 for old Raspberry Pis and freebsd/amd64) with the version injected via `-ldflags -X main.*` and appends them to that release. Dry-run: `goreleaser release --snapshot --clean`. The tiered platform-support matrix (core / best-effort / embedded, with driver requirements) is `product-knowledge/standards/release/platform-support.md` — keep `.goreleaser.yaml` targets in sync with it.
 - **Version embedding**: `cmd/goaldl/version.go` (`version`/`commit`/`date`) is set by ldflags at release time and falls back to `runtime/debug.ReadBuildInfo()` for a plain `go build`. `goaldl version` / `--version` prints it — every binary self-identifies.
 
 ## Architecture
