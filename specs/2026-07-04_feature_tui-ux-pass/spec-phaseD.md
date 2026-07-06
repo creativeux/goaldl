@@ -174,7 +174,7 @@ This composes with A.2 staleness (post-sync) and A.1 fatal errors (open failure)
 - **Scrub-to-arbitrary-position / mouse timeline** — seek is keyboard ±10 s + restart only.
 - **±60 s coarse seek tier** — not this slice (user chose ±10 s only).
 - **Persisting the chosen port / a port config file** — no config layer yet (same stance as Phase C's per-invocation format choice).
-- **Live re-connection / port hot-swap mid-session** — the picker is pre-session only; a live disconnect surfaces via A.2 staleness + A.1 on the next failed read, not an auto-reconnect.
+- **Live re-connection / port hot-swap mid-session** — was a Phase D non-goal (the picker is pre-session only; a live disconnect surfaced via A.2 staleness + A.1). **Superseded 2026-07-05** by a follow-up feature (branch `fix/serial-reconnect`): `SerialProvider` now retries indefinitely on a missing/dropped port (initial open included), so the session and its grids survive an outage; the dashboard shows an inline `⟳ reconnecting…` for a brief blip and a full "waiting for a port" screen for startup-with-no-port / a prolonged outage, resuming intact when the cable returns.
 - **Changing `Snapshot`/`Session`/`pkg/ecm`/`pkg/decoder`/`pkg/blm`** — the only core-adjacent changes are provider methods (`ReplayProvider.Seek`/`Duration`, `SerialProvider.Bytes`), below the facade. Decode path byte-identical; `blm` still 469 over the drive fixture.
 
 ## Files changed (planned)
