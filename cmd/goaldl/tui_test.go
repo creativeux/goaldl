@@ -1162,6 +1162,177 @@ func TestTUIReplayKeys(t *testing.T) {
 		t.Errorf("speed clamps at %v, want 0.25", got)
 	}
 	_ = cur
+
+	// Off-ladder start (e.g. -speed 5): [-] must step to the nearest lower stop
+	// and reach 1× — a ×0.5 factor never would. [+] steps to the nearest higher.
+	off := testModel()
+	off.replay = &stream.ReplayProvider{Speed: 5}
+	var oc tea.Model = off
+	oc, _ = oc.Update(runes('-'))
+	if got := off.replay.CurrentSpeed(); got != 4 {
+		t.Errorf("from 5× a [-] gives %v, want the 4× stop", got)
+	}
+	oc, _ = oc.Update(runes('-'))
+	oc, _ = oc.Update(runes('-'))
+	if got := off.replay.CurrentSpeed(); got != 1 {
+		t.Errorf("stepping down from 5× reaches %v, want 1×", got)
+	}
+	// And back up from 5× lands on 8×.
+	up := testModel()
+	up.replay = &stream.ReplayProvider{Speed: 5}
+	var uc tea.Model = up
+	uc, _ = uc.Update(runes('+'))
+	if got := up.replay.CurrentSpeed(); got != 8 {
+		t.Errorf("from 5× a [+] gives %v, want the 8× stop", got)
+	}
+	_ = uc
+}
+
+// fakeBytes is a stub byteSource for the waiting-screen diagnostics (there is no
+// serial-port fake). Its counter is set directly by the test.
+type fakeBytes struct{ n int64 }
+
+func (f *fakeBytes) Bytes() int64 { return f.n }
+
+// TestWaitingDiagnostics: before the first frame on a live source, the waiting
+// screen tells "no bytes" (cable) from "bytes but no sync" (baud/polarity) with
+// a rate; a replay shows the bare wait; once a frame arrives, neither renders.
+func TestWaitingDiagnostics(t *testing.T) {
+	// Live, no bytes yet → cable/port hint.
+	m := testModel()
+	m.serial = &fakeBytes{}
+	if body := m.waitingBody(); !strings.Contains(body, "no bytes yet") || !strings.Contains(body, "cable") {
+		t.Errorf("zero-byte waiting body = %q, want a cable/port hint", body)
+	}
+
+	// Live, bytes arriving but no sync → baud/polarity hint + rate.
+	m.bytesSeen = 318
+	m.byteRate = 159
+	body := m.waitingBody()
+	if !strings.Contains(body, "159 B/s") || !strings.Contains(body, "no sync") ||
+		!strings.Contains(body, "-b") || !strings.Contains(body, "-invert") {
+		t.Errorf("byte-flow waiting body = %q, want rate + baud/polarity hint", body)
+	}
+
+	// Replay (no serial handle): the bare wait, unchanged.
+	rp := testModel()
+	if body := rp.waitingBody(); strings.Contains(body, "check") {
+		t.Errorf("replay waiting body = %q, want the bare wait (no diagnostics)", body)
+	}
+
+	// Once a frame has arrived, the waiting branch is gone entirely.
+	m.hasFrame = true
+	if strings.Contains(m.activeBody(), "no bytes") || strings.Contains(m.activeBody(), "no sync") {
+		t.Error("diagnostics should not render once a frame has arrived")
+	}
+}
+
+// TestSerialBytes: the tick handler samples the byteSource, updating bytesSeen
+// and the per-tick rate the waiting screen reads.
+func TestSerialBytes(t *testing.T) {
+	fb := &fakeBytes{}
+	m := testModel()
+	m.serial = fb
+
+	fb.n = 159
+	n1, _ := m.Update(tickMsg(time.Unix(1, 0)))
+	m1 := n1.(tuiModel)
+	if m1.bytesSeen != 159 || m1.byteRate != 159 {
+		t.Errorf("after tick 1: bytesSeen=%d rate=%d, want 159/159", m1.bytesSeen, m1.byteRate)
+	}
+	fb.n = 318
+	n2, _ := m1.Update(tickMsg(time.Unix(2, 0)))
+	m2 := n2.(tuiModel)
+	if m2.bytesSeen != 318 || m2.byteRate != 159 {
+		t.Errorf("after tick 2: bytesSeen=%d rate=%d, want 318/159 (delta)", m2.bytesSeen, m2.byteRate)
+	}
+}
+
+// TestTUISeekKeys: [,]/[.] seek ±10s and [0] restarts, each clamped to the
+// capture length; the playback row shows position/total/percent + the seek key
+// hints; on a live source or an unpaced replay the keys warn and never seek.
+func TestTUISeekKeys(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "pkg", "decoder", "testdata", "drive_4800.raw"))
+	if err != nil {
+		t.Fatalf("reading fixture: %v", err)
+	}
+	// A real fixture-backed provider so the model's replayTotal and the provider's
+	// own internal clamp agree (both derive from Duration()).
+	rp := &stream.ReplayProvider{Data: raw, Config: decoder.DefaultConfig(), Speed: 1.0}
+	total := rp.Duration()
+	if total <= 30*time.Second {
+		t.Fatalf("fixture duration %v too short for this test", total)
+	}
+	mid := total / 2
+
+	newAt := func(pos time.Duration) tuiModel {
+		m := testModel()
+		m.replay = rp
+		m.replayTotal = total
+		m.latest.Elapsed = pos
+		return m
+	}
+
+	// [.] forward +10s from the current position.
+	fwd, _ := newAt(mid).Update(runes('.'))
+	if got, ok := fwd.(tuiModel).replay.PendingSeek(); !ok || got != mid+seekStep {
+		t.Errorf("[.] seek = %v (ok=%v), want %v", got, ok, mid+seekStep)
+	}
+
+	// [,] backward, clamped to 0 near the start.
+	back, _ := newAt(5 * time.Second).Update(runes(','))
+	if got, ok := back.(tuiModel).replay.PendingSeek(); !ok || got != 0 {
+		t.Errorf("[,] near start seek = %v (ok=%v), want 0 (clamped)", got, ok)
+	}
+
+	// [.] near the end, clamped to the total.
+	end, _ := newAt(total - 2*time.Second).Update(runes('.'))
+	if got, ok := end.(tuiModel).replay.PendingSeek(); !ok || got != total {
+		t.Errorf("[.] near end seek = %v (ok=%v), want %v (clamped)", got, ok, total)
+	}
+
+	// [0] restart.
+	zero, _ := newAt(mid).Update(runes('0'))
+	if got, ok := zero.(tuiModel).replay.PendingSeek(); !ok || got != 0 {
+		t.Errorf("[0] seek = %v (ok=%v), want 0", got, ok)
+	}
+
+	// The playback row carries the seek hints; the position/total/percent now
+	// lead the header status (left of Signal), without a "t=" prefix.
+	nav := newAt(mid).replayNav()
+	for _, want := range []string{"±10s", "restart", "pause"} {
+		if !strings.Contains(nav, want) {
+			t.Errorf("replayNav %q missing %q", nav, want)
+		}
+	}
+	pos := newAt(mid).replayPosition()
+	if !strings.Contains(pos, "(50%)") || strings.Contains(pos, "t=") {
+		t.Errorf("replayPosition = %q, want a t=-less position with (50%%)", pos)
+	}
+	head := newAt(mid).View()
+	if !strings.Contains(head, "(50%)") {
+		t.Errorf("header should carry the replay position; view lacks (50%%)")
+	}
+
+	// Live source: the seek keys warn and never seek.
+	live := testModel()
+	ln, _ := live.Update(runes('.'))
+	if !strings.Contains(ln.(tuiModel).notice, "replay-only") {
+		t.Errorf("live [.] notice = %q, want replay-only", ln.(tuiModel).notice)
+	}
+
+	// Unpaced replay: seek keys warn (inert), consistent with pause/speed.
+	un := testModel()
+	un.replay = &stream.ReplayProvider{Speed: 0}
+	un.replayTotal = time.Minute
+	un.latest.Elapsed = 10 * time.Second
+	uNext, _ := un.Update(runes('.'))
+	if !strings.Contains(uNext.(tuiModel).notice, "unpaced") {
+		t.Errorf("unpaced [.] notice = %q, want unpaced", uNext.(tuiModel).notice)
+	}
+	if _, ok := un.replay.PendingSeek(); ok {
+		t.Error("unpaced replay should ignore the seek")
+	}
 }
 
 // TestTUIDriveFixtureEndToEnd drives the full real drive capture through a

@@ -227,6 +227,203 @@ func TestReplayProviderUnpacedControlsInert(t *testing.T) {
 	}
 }
 
+// TestReplayDuration: Duration is the last frame's Elapsed, 0 for an empty
+// capture, and never disagrees with what a full Run reports.
+func TestReplayDuration(t *testing.T) {
+	data := driveCapture(t)
+	cfg := decoder.DefaultConfig()
+
+	p := &ReplayProvider{Data: data, Config: cfg, Speed: 0}
+	var lastElapsed time.Duration
+	if err := p.Run(context.Background(), func(ev FrameEvent) { lastElapsed = ev.Elapsed }); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := p.Duration(); got != lastElapsed {
+		t.Errorf("Duration = %v, want %v (last emitted Elapsed)", got, lastElapsed)
+	}
+	if lastElapsed == 0 {
+		t.Fatal("fixture produced a zero duration; test is vacuous")
+	}
+
+	if got := (&ReplayProvider{Data: nil, Config: cfg, Speed: 1.0}).Duration(); got != 0 {
+		t.Errorf("empty-capture Duration = %v, want 0", got)
+	}
+}
+
+// TestReplaySeek: a seek jumps the frame index (forward, backward, clamped) and
+// re-anchors so playback continues from there; a backward seek re-emits earlier
+// frames; a seek while paused shows the target frame then holds; an unpaced
+// (Speed 0) provider ignores seeks entirely.
+func TestReplaySeek(t *testing.T) {
+	data := driveCapture(t)
+	cfg := decoder.DefaultConfig()
+	frames := decoder.New(cfg).Decode(data)
+	if len(frames) < 300 {
+		t.Fatalf("fixture has %d frames, need ≥300 for this test", len(frames))
+	}
+	elapsed := func(i int) time.Duration { return frameElapsed(frames[i]) }
+
+	newPaced := func() (now func() time.Time, sleep func(context.Context, time.Duration) error) {
+		var vclock time.Duration
+		base := time.Unix(0, 0)
+		return func() time.Time { return base.Add(vclock) },
+			func(_ context.Context, d time.Duration) error { vclock += d; return nil }
+	}
+
+	t.Run("forward jumps and continues", func(t *testing.T) {
+		now, sleep := newPaced()
+		var p *ReplayProvider
+		p = &ReplayProvider{Data: data, Config: cfg, Speed: 1.0, now: now, sleep: sleep}
+		target := seekIndex(frames, elapsed(200))
+		var seq []int
+		seeked := false
+		if err := p.Run(context.Background(), func(ev FrameEvent) {
+			seq = append(seq, ev.Index)
+			if ev.Index == 3 && !seeked {
+				seeked = true
+				p.Seek(elapsed(200))
+			}
+		}); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		// The frame after index 3 must be the seek target, then monotonic to the end.
+		pos := -1
+		for i := 0; i+1 < len(seq); i++ {
+			if seq[i] == 3 {
+				pos = i
+				break
+			}
+		}
+		if pos < 0 || seq[pos+1] != target {
+			t.Fatalf("after frame 3 emitted %v, want a jump to %d", seq[pos+1:min(pos+3, len(seq))], target)
+		}
+		if seq[len(seq)-1] != len(frames)-1 {
+			t.Errorf("last emitted index = %d, want %d (played to the end)", seq[len(seq)-1], len(frames)-1)
+		}
+	})
+
+	t.Run("backward re-emits", func(t *testing.T) {
+		now, sleep := newPaced()
+		var p *ReplayProvider
+		p = &ReplayProvider{Data: data, Config: cfg, Speed: 1.0, now: now, sleep: sleep}
+		var seq []int
+		seeked := false
+		if err := p.Run(context.Background(), func(ev FrameEvent) {
+			seq = append(seq, ev.Index)
+			if ev.Index == 50 && !seeked {
+				seeked = true
+				p.Seek(0) // restart
+			}
+		}); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		// Index 0 must appear again after index 50 (frames re-emitted).
+		fiftyAt := -1
+		for i, v := range seq {
+			if v == 50 {
+				fiftyAt = i
+				break
+			}
+		}
+		reemitted := false
+		for _, v := range seq[fiftyAt+1:] {
+			if v == 0 {
+				reemitted = true
+				break
+			}
+		}
+		if !reemitted {
+			t.Errorf("index 0 not re-emitted after a Seek(0); seq tail = %v", seq[fiftyAt+1:min(fiftyAt+5, len(seq))])
+		}
+	})
+
+	t.Run("clamp past end", func(t *testing.T) {
+		now, sleep := newPaced()
+		var p *ReplayProvider
+		p = &ReplayProvider{Data: data, Config: cfg, Speed: 1.0, now: now, sleep: sleep}
+		var last int
+		seeked := false
+		if err := p.Run(context.Background(), func(ev FrameEvent) {
+			last = ev.Index
+			if ev.Index == 5 && !seeked {
+				seeked = true
+				p.Seek(p.Duration() * 2) // clamps to the end
+			}
+		}); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if last != len(frames)-1 {
+			t.Errorf("after clamped seek, last index = %d, want %d", last, len(frames)-1)
+		}
+	})
+
+	t.Run("while paused repositions but holds", func(t *testing.T) {
+		var vclock time.Duration
+		base := time.Unix(0, 0)
+		var p *ReplayProvider
+		var pauseSlices int
+		p = &ReplayProvider{
+			Data: data, Config: cfg, Speed: 1.0,
+			now: func() time.Time { return base.Add(vclock) },
+			sleep: func(_ context.Context, d time.Duration) error {
+				vclock += d
+				if p.Paused() {
+					pauseSlices++
+					if pauseSlices == 1 {
+						p.Seek(elapsed(200)) // seek once while paused
+					}
+					if pauseSlices == 5 {
+						p.SetPaused(false) // let it play out so Run terminates
+					}
+				}
+				return nil
+			},
+		}
+		var seq []int
+		p.Run(context.Background(), func(ev FrameEvent) {
+			seq = append(seq, ev.Index)
+			if ev.Index == 3 {
+				p.SetPaused(true)
+			}
+		})
+		// The seek target (200) is emitted once while paused; playback did not run
+		// away — the frame right after index 3 is the target, and the frames
+		// between 4 and 199 were skipped (jumped over, not paced through).
+		target := seekIndex(frames, elapsed(200))
+		threeAt := -1
+		for i, v := range seq {
+			if v == 3 {
+				threeAt = i
+				break
+			}
+		}
+		if threeAt < 0 || threeAt+1 >= len(seq) || seq[threeAt+1] != target {
+			got := seq[min(threeAt+1, len(seq)):min(threeAt+4, len(seq))]
+			t.Errorf("frame after index 3 = %v, want a jump to target %d (seek while paused)", got, target)
+		}
+	})
+
+	t.Run("unpaced ignores seek", func(t *testing.T) {
+		p := &ReplayProvider{
+			Data: data, Config: cfg, Speed: 0,
+			sleep: func(context.Context, time.Duration) error { t.Error("unpaced slept"); return nil },
+		}
+		var seq []int
+		p.Run(context.Background(), func(ev FrameEvent) {
+			seq = append(seq, ev.Index)
+			if ev.Index == 3 {
+				p.Seek(elapsed(200)) // must be a no-op
+			}
+		})
+		// Unpaced emits every frame in strict order; a seek changes nothing.
+		for i, v := range seq {
+			if v != i {
+				t.Fatalf("unpaced seq[%d] = %d, want %d (seek must be inert)", i, v, i)
+			}
+		}
+	})
+}
+
 // TestReplayProviderCancel: a cancelled context stops the stream promptly.
 func TestReplayProviderCancel(t *testing.T) {
 	data := driveCapture(t)

@@ -58,9 +58,18 @@ func main() {
 // cable is plugged in.
 func launchTUI(args []string) {
 	if len(args) == 0 {
-		if ports, _ := serial.AvailablePorts(); len(ports) == 1 {
-			args = []string{"-p", ports[0]}
+		ports, _ := serial.AvailablePorts()
+		switch {
+		case len(ports) == 1:
+			args = []string{"-p", ports[0]} // unambiguous: auto-connect
+		case stdinIsInteractive():
+			port := runPortPicker(ports) // 0 or 2+ ports: let the operator pick
+			if port == "" {
+				os.Exit(0) // the user chose not to connect — not an error
+			}
+			args = []string{"-p", port}
 		}
+		// Non-interactive with !=1 ports: fall through to cmdTUI → errNoTUISource.
 	}
 	cmdTUI(args)
 }
