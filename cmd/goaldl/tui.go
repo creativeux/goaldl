@@ -747,38 +747,43 @@ func (m tuiModel) modal(body string) string {
 	return box
 }
 
-// clearTarget names what [c] clears on the active tab (for the confirm modal).
-func (m tuiModel) clearTarget() string {
-	switch m.active {
+// clearSpec describes what [c] clears on a tab: the legend label, the modal
+// target name, and whether the tab currently holds anything to clear. It is the
+// single source for clearLabel/clearTarget/clearable; clear() below performs the
+// matching reset — keep the two in sync when adding a clearable tab.
+type clearSpec struct {
+	label  string
+	target string
+	has    func(tuiModel) bool
+}
+
+func clearSpecFor(v view) (clearSpec, bool) {
+	switch v {
 	case viewBLM:
-		return "BLM grid"
+		return clearSpec{"[c] clear BLM", "BLM grid", func(m tuiModel) bool { return m.grid.TotalSamples() > 0 }}, true
 	case viewINT:
-		return "INT grid"
+		return clearSpec{"[c] clear INT", "INT grid", func(m tuiModel) bool { return m.intGrid.TotalSamples() > 0 }}, true
 	case viewO2:
-		return "O2 grid"
+		return clearSpec{"[c] clear O2", "O2 grid", func(m tuiModel) bool { return m.o2Grid.TotalSamples() > 0 }}, true
 	case viewSpark:
-		return "SPARK grid"
+		return clearSpec{"[c] clear SPARK", "SPARK grid", func(m tuiModel) bool { return m.sparkGrid.TotalSamples() > 0 }}, true
 	case viewSensors:
-		return "sensor min/max"
+		return clearSpec{"[c] reset min/max", "sensor min/max", func(m tuiModel) bool { return m.hasExtrema }}, true
 	}
-	return ""
+	return clearSpec{}, false // flags/codes/raw: nothing to clear
+}
+
+// clearTarget names what [c] clears on the active tab (for the confirm modal);
+// "" only on non-clearable tabs, which never reach the modal (clearable gates it).
+func (m tuiModel) clearTarget() string {
+	s, _ := clearSpecFor(m.active)
+	return s.target
 }
 
 // clearable reports whether the active tab has something to clear.
 func (m tuiModel) clearable() bool {
-	switch m.active {
-	case viewBLM:
-		return m.grid.TotalSamples() > 0
-	case viewINT:
-		return m.intGrid.TotalSamples() > 0
-	case viewO2:
-		return m.o2Grid.TotalSamples() > 0
-	case viewSpark:
-		return m.sparkGrid.TotalSamples() > 0
-	case viewSensors:
-		return m.hasExtrema
-	}
-	return false
+	s, ok := clearSpecFor(m.active)
+	return ok && s.has(m)
 }
 
 // clear resets state for the active tab: the viewed grid (BLM/INT/O2/Spark) or,
@@ -1512,22 +1517,11 @@ func formatElapsed(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", m, s)
 }
 
-// clearLabel names what [c] clears on the active tab (the grid, or the sensor
-// min/max), or "" where clear is a no-op (flags/codes/raw) so [c] is hidden.
+// clearLabel names what [c] clears on the active tab for the footer legend, or
+// "" where clear is a no-op (flags/codes/raw) so [c] is hidden.
 func (m tuiModel) clearLabel() string {
-	switch m.active {
-	case viewBLM:
-		return "[c] clear BLM"
-	case viewINT:
-		return "[c] clear INT"
-	case viewO2:
-		return "[c] clear O2"
-	case viewSpark:
-		return "[c] clear SPARK"
-	case viewSensors:
-		return "[c] reset min/max"
-	}
-	return ""
+	s, _ := clearSpecFor(m.active)
+	return s.label
 }
 
 // speedLabel is the replay playback-speed hint carrying the current speed; 0
