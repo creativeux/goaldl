@@ -52,20 +52,20 @@ avoids this entirely (a locally built binary is never quarantined).
 ```bash
 git clone https://github.com/creativeux/goaldl.git
 cd goaldl
-go build ./cmd/goaldl     # produces ./goaldl
+go build ./cmd/goaldl     # produces ./goaldl in the current folder
 ```
-
-**Put it on your PATH** so you can run `goaldl` from anywhere — for example move
-it into a directory that's already on your PATH:
-
-```bash
-sudo mv goaldl /usr/local/bin/     # macOS / Linux
-```
-
-The examples below assume that. If you'd rather not, just run it by its path
-instead — `./goaldl` from the folder that contains it.
 
 ## Use it
+
+You don't need to install it anywhere. Run the binary from wherever it is:
+
+- **`./goaldl`** — a downloaded or freshly built binary, from its folder.
+- **`go run ./cmd/goaldl`** — straight from a source checkout, no build step.
+- **`goaldl`** — if you've put it on your PATH (optional; handy if you'll use it
+  a lot — e.g. `sudo mv goaldl /usr/local/bin/` on macOS/Linux).
+
+The examples below write it as `goaldl` for brevity — use whichever form above
+fits you.
 
 Plug in the cable, find your port, and launch the dashboard:
 
