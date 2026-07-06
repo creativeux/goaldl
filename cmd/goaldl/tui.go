@@ -357,10 +357,16 @@ const (
 	knockFreeFrac   = 0.5
 )
 
-// byteSource is the live raw-byte counter the waiting screen samples for its
-// cable-vs-config diagnostic. Satisfied by *stream.SerialProvider; an interface
-// so tests can stub it (there is no serial-port fake). nil on a replay source.
-type byteSource interface{ Bytes() int64 }
+// byteSource exposes the live provider's status the dashboard polls between
+// snapshots: the raw-byte counter (waiting-screen cable-vs-config diagnostic)
+// and whether it is reconnecting after a dropped cable. Satisfied by
+// *stream.SerialProvider; an interface so tests can stub it (there is no
+// serial-port fake). nil on a replay source.
+type byteSource interface {
+	Bytes() int64
+	Reconnecting() bool
+	ReconnectAttempt() int
+}
 
 type tuiModel struct {
 	// config / wiring
@@ -1424,9 +1430,29 @@ var (
 	modalStyle  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("8")).Padding(1, 3)
 )
 
+// reconnectEscalate is how many reconnect attempts (≈ seconds) a mid-session
+// outage shows the inline header indicator before the dashboard switches to the
+// full "waiting for a port" screen. A brief blip stays on the dashboard (grids
+// visible); a prolonged one gets the prominent screen — but the session and its
+// grids live on either way, so reconnecting restores the dashboard intact.
+const reconnectEscalate = 5
+
+// waitingForPort reports whether the full waiting-for-a-port screen should
+// replace the dashboard: a live source that is reconnecting and has either never
+// seen a frame (startup, no port yet) or been out long enough to escalate.
+func (m tuiModel) waitingForPort() bool {
+	if m.serial == nil || !m.serial.Reconnecting() {
+		return false
+	}
+	return !m.hasFrame || m.serial.ReconnectAttempt() > reconnectEscalate
+}
+
 func (m tuiModel) View() string {
 	if m.fatalErr != nil {
 		return m.padHeight(m.fitWidth(m.errorPanel()))
+	}
+	if m.waitingForPort() {
+		return m.padHeight(m.fitWidth(m.waitingForPortPanel()))
 	}
 	if m.confirm != confirmNone {
 		return m.padHeight(m.fitWidth(m.confirmPanel()))
@@ -1452,7 +1478,13 @@ func (m tuiModel) View() string {
 	if m.done {
 		status += "   " + dimStyle.Render("(stream ended)")
 	}
-	if stale, age := m.stale(); stale {
+	if m.serial != nil && m.serial.Reconnecting() {
+		// A dropped cable is being retried in the background (not a fatal error).
+		// This is the more specific signal, so it stands in for the stale age. The
+		// full waiting screen takes over once the outage passes reconnectEscalate
+		// (see View); this inline form covers the brief blip before that.
+		status += "   " + beatWarn.Render(fmt.Sprintf("⟳ reconnecting… %d", m.serial.ReconnectAttempt()))
+	} else if stale, age := m.stale(); stale {
 		status += "   " + beatBad.Render(fmt.Sprintf("no data %.0fs", age.Seconds()))
 	}
 	status += m.sessionChrome()
@@ -1962,6 +1994,32 @@ func (m tuiModel) errorPanel() string {
 		fmt.Fprintf(&b, "  %s\n", dimStyle.Render("• Wrong baud rate?  add  -b 2400"))
 		fmt.Fprintf(&b, "  %s\n\n", dimStyle.Render("• Non-inverting cable?  add  -invert"))
 	}
+	fmt.Fprintf(&b, "  %s", dimStyle.Render("[q] quit"))
+	return b.String()
+}
+
+// waitingForPortPanel is the full-screen "no connection" state (startup with no
+// port, or an outage that has escalated). It keeps re-polling in the background
+// (SerialProvider retries; the model just renders) and resumes the dashboard the
+// instant a port opens — with all accumulated grids intact, since the session
+// never ended. It distinguishes "connecting" (never seen a frame) from
+// "connection lost" (had one, now dropped).
+func (m tuiModel) waitingForPortPanel() string {
+	var b strings.Builder
+	attempt := 0
+	if m.serial != nil {
+		attempt = m.serial.ReconnectAttempt()
+	}
+	if m.hasFrame {
+		fmt.Fprintf(&b, "\n  %s\n\n", beatWarn.Render("⟳ Connection to "+m.source+" lost"))
+		fmt.Fprintf(&b, "  %s\n", dimStyle.Render("Plug the adapter back in — the session is preserved and resumes automatically."))
+	} else {
+		fmt.Fprintf(&b, "\n  %s\n\n", beatWarn.Render("⟳ Waiting for "+m.source))
+		fmt.Fprintf(&b, "  %s\n", dimStyle.Render("Plug in the adapter — the dashboard starts as soon as it connects."))
+	}
+	fmt.Fprintf(&b, "  %s\n", dimStyle.Render(fmt.Sprintf("Retrying… (attempt %d)", attempt)))
+	fmt.Fprintf(&b, "\n  %s\n", dimStyle.Render("macOS needs Prolific's \"PL2303 Serial\" App Store driver for a PL2303 adapter."))
+	fmt.Fprintf(&b, "  %s\n\n", dimStyle.Render("Wrong port name? run  goaldl ports   ·   wrong baud/polarity? relaunch with  -b 2400 / -invert"))
 	fmt.Fprintf(&b, "  %s", dimStyle.Render("[q] quit"))
 	return b.String()
 }
