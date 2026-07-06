@@ -55,6 +55,16 @@ cd goaldl
 go build ./cmd/goaldl     # produces ./goaldl
 ```
 
+**Put it on your PATH** so you can run `goaldl` from anywhere — for example move
+it into a directory that's already on your PATH:
+
+```bash
+sudo mv goaldl /usr/local/bin/     # macOS / Linux
+```
+
+The examples below assume that. If you'd rather not, just run it by its path
+instead — `./goaldl` from the folder that contains it.
+
 ## Use it
 
 Plug in the cable, find your port, and launch the dashboard:
