@@ -1,6 +1,6 @@
 <!--
 GLaDOS-MANAGED STANDARD
-Last Updated: 2026-07-05
+Last Updated: 2026-07-06
 -->
 # Conventional Commits drive automated semver releases
 
@@ -22,6 +22,10 @@ Last Updated: 2026-07-05
 4. [GoReleaser](https://goreleaser.com) (`.goreleaser.yaml`) builds macOS/Linux/Windows × amd64/arm64 binaries with the version injected via ldflags and appends them to the release. Dry-run with `goreleaser release --snapshot --clean`.
 
 All three (release-please, GoReleaser, the `Release` workflow in `.github/workflows/release.yml`) fire from the same push-to-`main` event; the repo needs Actions "Read and write" permissions **and** "Allow GitHub Actions to create and approve pull requests" enabled.
+
+**Forcing a specific version** (rare — e.g. the *first* release: release-please defaults the initial release to `1.0.0`, ignoring the pre-1.0 rules). The **only reliable override is `"release-as": "<version>"` in the package block of `release-please-config.json`** — a real file change that survives every merge strategy and hard-overrides the computed bump. **Remove it in a follow-up PR once the target version is tagged**, or it pins every subsequent release to that version.
+
+Do **not** reach for the `Release-As:` commit *footer* here — it kept failing on this repo's merge button (learned cutting v0.1.0, 2026-07-06): a **squash** merge concatenates commit messages and buries the footer mid-body where release-please won't parse it; a **rebase** merge of the empty commit that usually carries the footer drops the commit entirely. The footer only survives a true merge commit, which the merge button doesn't guarantee.
 
 **Version embedding**: `cmd/goaldl/version.go` holds `version`/`commit`/`date`, overwritten at release time by GoReleaser's `-ldflags -X main.*`. A plain `go build` leaves them at defaults and falls back to `runtime/debug.ReadBuildInfo()` (VCS revision + `+dirty`). `goaldl version` / `--version` prints the result — every binary self-identifies, released or from-source.
 
