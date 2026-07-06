@@ -113,6 +113,8 @@ The full tiered matrix and the embedded/microcontroller story are in
   rich/lean fuel map.
 - **[How it works](docs/protocol.md)** — the ALDL protocol and how goaldl
   decodes it.
+- **[Vehicle support matrix](docs/vehicle-support.md)** — the addressable range
+  of 1980–1995 GM ALDL ECMs (160- vs 8192-baud) and what we'd add next.
 - **[Development](docs/development.md)** — building, testing, releases, and the
   project layout.
 
