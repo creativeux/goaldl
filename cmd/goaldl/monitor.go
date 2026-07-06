@@ -145,12 +145,15 @@ func runBLMView(ctx context.Context, provider stream.Provider, title string, min
 	fmt.Print(g.RenderFloat("", g.CorrectionAtLeast(minSamples), 3))
 }
 
-// isTTY reports whether f is an interactive terminal, so the renderer knows
-// whether it may redraw in place with cursor movement.
+// isTTY reports whether f is an interactive terminal that will honor ANSI
+// escapes, so the renderer knows whether it may redraw in place with cursor
+// movement. On Windows this also switches the console into virtual-terminal
+// mode (legacy conhost ships with it off); Bubble Tea does the same for the
+// dashboard, but the streaming renderers write ANSI directly.
 func isTTY(f *os.File) bool {
 	info, err := f.Stat()
 	if err != nil {
 		return false
 	}
-	return info.Mode()&os.ModeCharDevice != 0
+	return info.Mode()&os.ModeCharDevice != 0 && enableVT(f)
 }
