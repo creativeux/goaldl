@@ -21,6 +21,9 @@ standards:
   - path: release/platform-support.md
     area: release
     summary: Tiered OS/arch support matrix (core/best-effort/embedded); platform code stays confined to pkg/serial and the VT seam.
+  - path: review/agent-pr-review.md
+    area: review
+    summary: Every PR gets an automated agent first-pass review; claude-review is a required check blocking only on must-severity findings.
 reference:
   - path: sda-standard-v1.md
     area: sda
