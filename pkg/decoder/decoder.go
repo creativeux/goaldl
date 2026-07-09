@@ -119,6 +119,10 @@ func (d *Decoder) Decode(data []byte) []Frame {
 	var frames []Frame
 	for _, b := range data {
 		if f := d.Feed(b); f != nil {
+			// Skip implausible frames so consumers only see clean data.
+			if len(f.Data) > 7 && f.Data[7] > 160 {
+				continue
+			}
 			frames = append(frames, *f)
 		}
 	}
