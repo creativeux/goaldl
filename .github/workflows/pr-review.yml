@@ -73,8 +73,11 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # To pin/cheapen the model, add e.g. `--model claude-haiku-4-5` to claude_args.
+          # max-turns must comfortably exceed the review's tool calls (read the standards
+          # index + files, philosophies, personas; gh diff/view; comment; label; status) —
+          # 12 was too tight and runs died mid-review with "Reached maximum number of turns".
           claude_args: >-
-            --max-turns 12
+            --max-turns 40
             --allowedTools Read,Grep,Glob,Bash
           prompt: |
             You are the automated first-pass reviewer for the goaldl repository — a
@@ -100,10 +103,11 @@ jobs:
                run `gh pr edit ${{ steps.pr.outputs.number }} --add-label needs-description`.
                (Incomplete description alone is a `should`, not a blocker.)
 
-            2. STANDARDS & PHILOSOPHY compliance. Read
-               `product-knowledge/standards/index.yml`, then the individual standard
-               files it lists and both `product-knowledge/philosophies/*.md`. Check the
-               diff against each. Assign severity per the GLaDOS gate tiers: `must` =
+            2. STANDARDS & PHILOSOPHY compliance. Work efficiently to stay within the
+               turn budget: read `product-knowledge/standards/index.yml`, then open only
+               the standard files whose area the diff actually touches (Grep before a full
+               Read), plus both `product-knowledge/philosophies/*.md`. Check the diff
+               against each. Assign severity per the GLaDOS gate tiers: `must` =
                BLOCKING, `should` = warning, `may` = info. Pay special attention to:
                  - raw-data-policy: NO plausibility filtering / outlier rejection /
                    smoothing in the decode path (`pkg/decoder`, frame emission in
