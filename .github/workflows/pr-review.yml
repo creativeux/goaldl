@@ -20,9 +20,13 @@ permissions:
   statuses: write
   id-token: write
 
+# Only push events cancel an in-progress review (new commits obsolete it). Comment
+# events must NEVER cancel: the agent posts its review comment as claude[bot] (the
+# app token), which fires issue_comment on the same PR — with unconditional
+# cancel-in-progress, the agent's own comment cancelled its own run mid-flight.
 concurrency:
   group: pr-review-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   review:
