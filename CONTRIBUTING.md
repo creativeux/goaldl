@@ -69,3 +69,5 @@ These are the load-bearing invariants — worth checking yourself before opening
 
 See `product-knowledge/standards/index.yml` for the full catalog and the
 `product-knowledge/personas/` review lenses.
+
+<!-- strict verification: clean -->
