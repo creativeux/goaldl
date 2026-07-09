@@ -68,6 +68,8 @@ jobs:
 
       - name: Agent review
         uses: anthropics/claude-code-action@v1
+        timeout-minutes: 12
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         with:
@@ -139,29 +141,35 @@ jobs:
                  - Persona lines (PM / Architect / QA)
                  - Issues, grouped by severity (Blocking / Warning / Info)
                  - Overall verdict line
-               Keep it concise and actionable. Then run
+               Keep it concise and actionable. On the VERY LAST line of the comment,
+               emit a machine-readable verdict marker, exactly one of:
+                 <!-- claude-review-verdict: PASS -->
+                 <!-- claude-review-verdict: BLOCK -->
+               Use BLOCK if there is at least one `must`/blocking-severity issue;
+               otherwise PASS (warnings and info-level notes never cause BLOCK). A
+               separate deterministic step reads this marker to set the required status,
+               so the marker MUST be present and accurate. Then run
                `gh pr edit ${{ steps.pr.outputs.number }} --add-label agent-reviewed`.
 
-            6. PUBLISH THE VERDICT as the `claude-review` commit status on the head
-               commit `${{ steps.pr.outputs.sha }}`. Run EXACTLY ONE of these as your
-               final action (warnings and info-level notes never cause failure):
-                 - If there is at least one `must`/blocking-severity issue:
-                   gh api -X POST repos/${{ github.repository }}/statuses/${{ steps.pr.outputs.sha }} -f state=failure -f context=claude-review -f "description=Blocking (must-severity) issues found — see the review comment" -f target_url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-                 - Otherwise:
-                   gh api -X POST repos/${{ github.repository }}/statuses/${{ steps.pr.outputs.sha }} -f state=success -f context=claude-review -f "description=No blocking issues found" -f target_url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-      # Fail closed: if the agent step died before publishing its verdict, the
-      # claude-review status is still "pending" — flip it to error so the required
-      # check never hangs and a broken run can't be mistaken for a pass.
-      - name: Fail closed if no verdict published
+      # Deterministic verdict publishing — NOT the agent's job. Reads the verdict marker
+      # from the agent's PR comment and sets the claude-review commit status. Runs even if
+      # the agent step is cancelled mid-run (if: always()), so a verdict that made it into
+      # a comment is never lost, and a run that never commented fails closed to `error`.
+      - name: Publish verdict status
         if: always()
         run: |
-          current=$(gh api "repos/$GITHUB_REPOSITORY/commits/${{ steps.pr.outputs.sha }}/statuses" \
-            --jq 'map(select(.context=="claude-review"))[0].state // ""')
-          if [ "$current" = "pending" ] || [ -z "$current" ]; then
-            gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/${{ steps.pr.outputs.sha }}" \
-              -f state=error \
-              -f context=claude-review \
-              -f description="Agent review did not complete" \
-              -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          fi
+          body=$(gh api "repos/$GITHUB_REPOSITORY/issues/${{ steps.pr.outputs.number }}/comments" \
+            --jq 'map(select(.body | test("claude-review-verdict")))[-1].body // ""')
+          verdict=$(printf '%s' "$body" | grep -oiE 'claude-review-verdict: *(PASS|BLOCK)' \
+            | grep -oiE 'PASS|BLOCK' | tr '[:lower:]' '[:upper:]' | head -1)
+          case "$verdict" in
+            PASS)  state=success; desc="No blocking issues found" ;;
+            BLOCK) state=failure; desc="Blocking (must-severity) issues found — see the review comment" ;;
+            *)     state=error;   desc="Agent review did not complete" ;;
+          esac
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/${{ steps.pr.outputs.sha }}" \
+            -f state="$state" \
+            -f context=claude-review \
+            -f description="$desc" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          echo "verdict=$verdict state=$state"
