@@ -44,18 +44,33 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Resolve PR number and head SHA
+      - name: Resolve PR number, head SHA, and review mode
         id: pr
+        env:
+          # via env, not inline interpolation: branch names are attacker-controlled
+          # on fork PRs and could inject shell if expanded inside the script
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
-            echo "sha=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+            num="${{ github.event.pull_request.number }}"
+            sha="${{ github.event.pull_request.head.sha }}"
+            branch="$HEAD_BRANCH"
           else
             num="${{ github.event.issue.number }}"
             sha=$(gh pr view "$num" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)
-            echo "number=$num" >> "$GITHUB_OUTPUT"
-            echo "sha=$sha" >> "$GITHUB_OUTPUT"
+            branch=$(gh pr view "$num" --repo "$GITHUB_REPOSITORY" --json headRefName --jq .headRefName)
           fi
+          # release-please PRs get a release-only review: the code in them already
+          # passed review when it merged to main.
+          case "$branch" in
+            release-please--*) mode=release ;;
+            *)                 mode=standard ;;
+          esac
+          {
+            echo "number=$num"
+            echo "sha=$sha"
+            echo "mode=$mode"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Mark review pending
         run: |
@@ -101,13 +116,37 @@ jobs:
             `gh pr view ${{ steps.pr.outputs.number }} --json title,body,files` for the
             description, and Read/Grep/Glob on the checked-out working tree for context.
 
+            REVIEW MODE: ${{ steps.pr.outputs.mode }}
+
+            If the mode is "release", this is an automated release-please PR — the code
+            it releases already passed review when it merged to main. SKIP steps 1-4
+            below and check ONLY these release items:
+              - Changed files: nothing outside `CHANGELOG.md` and
+                `.release-please-manifest.json`. Any other file changed = BLOCKING.
+              - The version bump follows `product-knowledge/standards/release/versioning.md`
+                (pre-1.0: `feat:`/`fix:` bump the patch; only a breaking change bumps the
+                minor; never auto-1.0.0), judged against the actual commit types since the
+                last tag (`git log $(git describe --tags --abbrev=0)..HEAD --oneline`).
+                A wrong bump = BLOCKING.
+              - CHANGELOG entries correspond to real commits since the last tag. Flag
+                miscategorized entries (e.g. CI-only changes listed as bug fixes) as
+                warnings, noting they trace to commit types on main and can't be fixed in
+                this PR.
+            Do NOT apply the `needs-description` label to a release PR (its body is
+            auto-generated). Then continue from step 5: post the review comment (release
+            findings only) with the verdict marker, and add the `agent-reviewed` label.
+
             Perform these steps:
 
             1. TRIAGE — description completeness. Compare the PR body against the
                sections in `.github/pull_request_template.md`. List any required section
                that is missing or empty. If the description is materially incomplete,
                run `gh pr edit ${{ steps.pr.outputs.number }} --add-label needs-description`.
-               (Incomplete description alone is a `should`, not a blocker.)
+               (Incomplete description alone is a `should`, not a blocker.) Also check
+               that the PR title's Conventional Commit type matches the changed files:
+               `feat:`/`fix:` are for product code — a PR touching only `.github/`,
+               docs, or CI config should be `ci:`/`docs:`/`chore:`. A mismatch is a
+               warning (it makes release-please cut spurious releases).
 
             2. STANDARDS & PHILOSOPHY compliance. Work efficiently to stay within the
                turn budget: read `product-knowledge/standards/index.yml`, then open only
