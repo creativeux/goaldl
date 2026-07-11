@@ -1,0 +1,89 @@
+<!-- goaldl test fixture, written from scratch to mirror the community XML XDF structure -->
+<XDFFORMAT version="1.60">
+  <XDFHEADER>
+    <deftitle>$42-mini-xml</deftitle>
+    <description>fixture</description>
+  </XDFHEADER>
+  <XDFTABLE uniqueid="0x1" flags="0x0">
+    <title>Main VE Table</title>
+    <XDFAXIS id="x" uniqueid="0x0">
+      <indexcount>9</indexcount>
+      <units>kPa</units>
+      <LABEL index="0" value="20" />
+      <LABEL index="1" value="30" />
+      <LABEL index="2" value="40" />
+      <LABEL index="3" value="50" />
+      <LABEL index="4" value="60" />
+      <LABEL index="5" value="70" />
+      <LABEL index="6" value="80" />
+      <LABEL index="7" value="90" />
+      <LABEL index="8" value="100" />
+      <MATH equation="X">
+        <VAR id="X" />
+      </MATH>
+    </XDFAXIS>
+    <XDFAXIS id="y" uniqueid="0x0">
+      <indexcount>8</indexcount>
+      <units>RPM</units>
+      <LABEL index="0" value="400" />
+      <LABEL index="1" value="800" />
+      <LABEL index="2" value="1200" />
+      <LABEL index="3" value="1600" />
+      <LABEL index="4" value="2000" />
+      <LABEL index="5" value="2400" />
+      <LABEL index="6" value="2800" />
+      <LABEL index="7" value="3200" />
+      <MATH equation="X">
+        <VAR id="X" />
+      </MATH>
+    </XDFAXIS>
+    <XDFAXIS id="z">
+      <EMBEDDEDDATA mmedaddress="0x37F" mmedelementsizebits="8" mmedrowcount="8" mmedcolcount="9" />
+      <MATH equation="X*0.392156862745098">
+        <VAR id="X" />
+      </MATH>
+    </XDFAXIS>
+  </XDFTABLE>
+  <XDFTABLE uniqueid="0x2" flags="0x0">
+    <title>Embedded Axis Table</title>
+    <XDFAXIS id="x" uniqueid="0x0">
+      <EMBEDDEDDATA mmedaddress="0x100" mmedelementsizebits="8" />
+      <indexcount>4</indexcount>
+      <LABEL index="0" value="0.00" />
+      <LABEL index="1" value="0.00" />
+      <LABEL index="2" value="0.00" />
+      <LABEL index="3" value="0.00" />
+      <MATH equation="X">
+        <VAR id="X" />
+      </MATH>
+    </XDFAXIS>
+    <XDFAXIS id="y" uniqueid="0x0">
+      <indexcount>3</indexcount>
+      <LABEL index="0" value="10" />
+      <LABEL index="1" value="20" />
+      <LABEL index="2" value="30" />
+      <MATH equation="X">
+        <VAR id="X" />
+      </MATH>
+    </XDFAXIS>
+    <XDFAXIS id="z">
+      <EMBEDDEDDATA mmedaddress="0x200" mmedelementsizebits="8" mmedrowcount="3" mmedcolcount="4" />
+    </XDFAXIS>
+  </XDFTABLE>
+  <XDFTABLE uniqueid="0x3" flags="0x0">
+    <title>Text Label Table</title>
+    <XDFAXIS id="x" uniqueid="0x0">
+      <indexcount>2</indexcount>
+      <LABEL index="0" value="low" />
+      <LABEL index="1" value="high" />
+    </XDFAXIS>
+    <XDFAXIS id="y" uniqueid="0x0">
+      <indexcount>2</indexcount>
+      <LABEL index="0" value="1" />
+      <LABEL index="1" value="2" />
+    </XDFAXIS>
+    <XDFAXIS id="z">
+      <EMBEDDEDDATA mmedaddress="0x300" mmedelementsizebits="8" mmedrowcount="2" mmedcolcount="2" />
+    </XDFAXIS>
+  </XDFTABLE>
+</XDFFORMAT>

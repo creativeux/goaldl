@@ -33,3 +33,31 @@ goaldl monitor -p /dev/cu.usbserial-10 -blm -o session.raw   # streaming grid
 factor — matching the format of `data/20250601_162123_BLM.txt`. The MAP→kPa
 axis uses a standard GM 1-bar transfer (`pkg/ecm/fueltrim.go`); it only affects
 which column a reading lands in, not the BLM math.
+
+## Straight into TunerPro: `-xdf`
+
+Editing the tune in TunerPro? Point `blm` at the same XDF definition and it
+builds the grid **on your VE table's own axes** and emits a paste block, so a
+logged drive becomes applied corrections in one paste — no manual re-binning:
+
+```bash
+# What tables does the definition offer?
+goaldl blm drive_4800.raw -xdf 42.xdf
+
+# Build the correction on the Main VE Table's axes and export a paste block
+goaldl blm drive_4800.raw -xdf 42.xdf -table "main ve" -paste ve.txt
+```
+
+In TunerPro open the VE table, select all cells, and use paste-with-multiply
+(`Edit → Paste Special`): every cell is scaled by its correction factor.
+Cells below the sample threshold export `1.000`, so unproven areas of the map
+are left untouched. Samples beyond the table's axis range bin into the edge
+cells (the command notes how many); clean WOT/decel frames were never recorded
+in the first place.
+
+Both XDF formats work — the legacy text format (tunerpro.net's own `$42`
+definition) and the XML format modern community definitions use. Table titles
+match case-insensitively and by substring; an ambiguous or unknown title
+prints the candidates. Definitions whose axis breakpoints live in the bin
+(rather than as literal labels) are refused with an explanation — goaldl
+never reads the bin itself.
