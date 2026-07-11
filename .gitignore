@@ -15,3 +15,7 @@
 
 # GoReleaser build output
 /dist/
+
+# Downloaded community/vendor definition files (license/redistribution unverified —
+# test fixtures must be written from scratch or cleared before committing)
+/data/xdf/

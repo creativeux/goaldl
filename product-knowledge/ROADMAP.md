@@ -1,13 +1,15 @@
 <!--
 SDA: v1.0
 GLaDOS-MANAGED DOCUMENT
-Last Updated: 2026-07-04
+Last Updated: 2026-07-11
 To modify: Edit directly.
 -->
 
 # Roadmap
 
 Mission: a working, cross-platform scanner/datalogger/tuning aid for GM 160-baud ALDL ECMs (primary target: GM 1227747), in Go, over an ordinary USB serial adapter. See [MISSION.md](MISSION.md).
+
+**Positioning (2026-07-11)**: goaldl is the **car-side complement to TunerPro RT**, not its replacement. goaldl captures and preps; TunerPro edits the bin. The sweet spot is **onboard logging + data prep for tuning** — everything below WinALDL parity flows toward that. Competitive analysis trace: `specs/2026-07-11_plan-product/`.
 
 ## Phase 0: Decode & consolidate — ✅ done (2026-07-03)
 
@@ -53,12 +55,32 @@ Mission: a working, cross-platform scanner/datalogger/tuning aid for GM 160-baud
 - [x] **Phase D — Replay & startup** ✅ shipped + verified (2026-07-05; fresh evaluator PASS 10/10): replay position `m:ss / m:ss (N%)` in the header + `,`/`.` ±10s + `0` restart (provider `ReplayProvider.Seek`/`Duration`, frame-boundary jump; backward seek leaves grids as-is); `+`/`-` fixed speed ladder; waiting-screen byte diagnostics (`SerialProvider.Bytes()` → cable vs baud/polarity with B/s); in-TUI port picker on 0/2+ ports (auto-connect at 1, stdlib TTY guard). Only below-facade provider additions; Session/Snapshot untouched, goldens byte-identical, `blm` 469.
 - [ ] **Phase E — Learnability**: `?` help overlay, context-sensitive footer, codes/flags session latch, PROM-gated extrema
 
-## Phase 4: Beyond parity — ⏳ opportunistic
+## Horizon 1: Data prep for tuning — ⏳ next (after TUI UX pass)
 
-- [ ] `serve` adapter (HTTP/WebSocket) proving the `Session` API drives a non-terminal front-end (web/mobile) — inherits flags/codes/grids for free from `Snapshot`
-- [ ] Dash (big-number) view
+**Goal**: close the drive → paste-into-TunerPro loop. goaldl already computes what tuners do by hand in TunerPro (BLM histogram → mental VE correction); make that output land directly in the bin editor.
+
+- [ ] **XDF-aware correction export**: read the community XDF for the bin being tuned (read-only parse — table axes, addresses, scaling), re-bin the BLM correction grid onto the actual VE/fuel table's axes, emit TunerPro's tab-delimited paste format. `goaldl blm session.raw --xdf 747.xdf` → paste → multiply.
+- [ ] **Suggested-change report**: per-cell current × correction = proposed value, with sample counts and confidence-threshold flags, reviewable before pasting.
+- [ ] **Session report**: post-drive one-shot summary — knock events with RPM/MAP/time context, open/closed-loop time split, under-threshold cells ("drive more at 2000 RPM / 60 kPa"), warm-up curve, extrema.
+- [ ] **Cross-session correction diff**: did the last bin change move cells toward 128? Diff two sessions' correction grids — direct feedback on whether the TunerPro edit worked.
+
+## Horizon 2: Onboard logging — ⏳ bridge first (ESP32-S3 in flight)
+
+**Goal**: the car logs itself; no laptop rides shotgun. Bridge path first (hardware ordered, spec held), Pi daemon later reusing the same headless features.
+
+- [ ] **TCPProvider** — specced + held for hardware (`specs/2026-07-06_feature_tcp-provider/`): ESP32-S3 bridge streams raw bytes over WiFi/TCP; goaldl consumes via `-tcp host:port`. Implementation resumes when the S3 arrives (real-bridge validation is the ground-truth step).
+- [ ] `serve` adapter (HTTP/WebSocket) proving the `Session` API drives a non-terminal front-end — inherits flags/codes/grids for free from `Snapshot`
+- [ ] Phone-bracket live dashboard (gauges + BLM grid) on the `serve` adapter; Dash (big-number) view
+- [ ] **Headless record mode** (later, Pi Zero-class): daemonized `record` — start on boot, file rotation, minimal heartbeat signal; pure Go on the existing serial path
+- [ ] Optional onboard MCU datalogging bridge, falling-edge method (superseded in the near term by the ESP32-S3 UART approach; keep as fallback)
+
+## Horizon 3: Interop & breadth — ⏳ demand-driven
+
+**Goal**: speak the community's formats so goaldl slots into existing workflows and covers more ECMs without hand-porting.
+
+- [ ] **ADX import**: derive `pkg/ecm` definitions from TunerPro ADX (XML) files — gets the 1227165 and siblings for free, keeps conversions identical to what the user sees in TunerPro
+- [ ] **Log format interop**: export decoded frames in formats TunerPro's playback/histograms accept; optional WinALDL log format (we already match its ground truth)
 - [ ] Config-file persistence (port / ECM / TPS calibration)
-- [ ] Additional ECM definitions (data-only, demand-driven)
-- [ ] Optional onboard MCU datalogging bridge (bot-thoughts falling-edge method)
+- [ ] Additional ECM definitions (data-only, demand-driven — via ADX import above where possible)
 
-**Permanent non-goals**: Narrow/Avg10/StdDev grid modes; Windows-dialog config UX; any plausibility filtering in the decode path (raw-data-raw).
+**Permanent non-goals**: bin/hex editing, XDF table editing, emulation, PROM burning/reading, checksum plugins (TunerPro's half of the partnership — 2026-07-11); Narrow/Avg10/StdDev grid modes; Windows-dialog config UX; any plausibility filtering in the decode path (raw-data-raw).
