@@ -149,3 +149,18 @@ Second use of the shape after `data/xdf/` itself; candidate for a testing standa
 **Remaining before close**: verify-feature (fresh evaluator) + the two carried manual steps —
 hands-on TunerPro multiply-paste check (user, Windows box) and the V5.9.3 XML confirmation
 (user download).
+
+## PR + XML confirmation — 2026-07-11 (later)
+
+- **PR #41 opened**; CI + agent review both pass ("No blocking issues found").
+- **XML-confirmation task CLOSED**: user downloaded `$42-1227747-V5.9.3.xdf` and
+  `$42-1227747-V4T.xdf` (gearhead-efi thread 304; forum-page PDF saved as
+  `data/1227747 ECM Information $42.pdf`, gitignored). Both parse as XML (57/48 tables);
+  end-to-end export against the drive capture reproduces the same correction values as the
+  official legacy file, and V5.9.3's genuinely transposed "Main Fuel Table Corrected" (9×8,
+  X=RPM) exports correctly in its own layout — the orientation contract proven against a real
+  in-the-wild table. `TestRealXDF` is now table-driven over all three real files (`07376c8`).
+- Finding worth keeping: the three real definitions use three different VE-table titles
+  ("Main VE Table" / "Fuel VE 1 - Main Fuel Table" / "VE as % (FL1)") — community naming
+  drift that validates the explicit `-table` decision over auto-detect.
+- **Still carried to verify**: only the hands-on TunerPro multiply-paste check remains.
