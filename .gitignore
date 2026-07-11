@@ -19,3 +19,6 @@
 # Downloaded community/vendor definition files (license/redistribution unverified —
 # test fixtures must be written from scratch or cleared before committing)
 /data/xdf/
+
+# Forum-page reference PDFs saved alongside downloaded definitions (same license caveat)
+/data/*.pdf

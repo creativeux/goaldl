@@ -1,0 +1,3 @@
+# XDF fixtures exercise the format exactly as TunerPro writes it (CRLF);
+# keep byte-for-byte, no EOL normalization.
+pkg/xdf/testdata/*.xdf -text

@@ -108,3 +108,59 @@ implementation.
   no parallel path (no resampler, no second accumulation loop; one wrapper refactor).
 
 **Gate decision: PROCEED** (no violations; one by-design warning carried to verify).
+
+## Implementation — 2026-07-11 (branch `feat/xdf-correction-export`, off main `866e81b`)
+
+All 11 tasks complete ([tasks.md](tasks.md)). Files:
+
+- **New `pkg/xdf/`**: `xdf.go` (types, sniff, `Find`, validation), `legacy.go` (text v1.x parser),
+  `xml.go` (XML parser), `xdf_test.go` + `testdata/mini-legacy.xdf` / `mini-xml.xdf`
+  (from-scratch fixtures, license-safe).
+- **`cmd/goaldl/blm.go`**: `-xdf`/`-table`/`-paste` flags, discovery listing, `classifyAxes`
+  (units → range fallback; refuses to guess), `accumulateBLMInto` refactor (+out-of-range count;
+  `accumulateBLM` wrapper keeps the old call sites/tests untouched), `pasteBlock` (headerless
+  TSV, CRLF, %.3f, table-layout orientation incl. transpose).
+- **`cmd/goaldl/blm_xdf_test.go`**: VE-axes parity vs the drive fixture (469 samples, 1600×40 ≈
+  117.17 — same numbers as the default-axes regression), paste-block format + transposed
+  orientation, classification refusals, discovery listing, wrapper-parity.
+- **Docs**: `docs/blm-tuning.md` new "Straight into TunerPro" section; `CLAUDE.md` command +
+  architecture entries.
+
+**Spec deviations (2, both parser-hardening found by the real file):**
+1. Legacy label defects are per-axis (`Axis.LabelErr`), not parse-fatal — the official 42.xdf
+   writes `XLabels =(null)` on its 1D tables, and one bad table must not hide the other 49.
+   `(null)` literally means "no labels". (Spec assumed label errors were block-fatal.)
+2. Same leniency on the XML side for non-numeric (text) labels — the table lists in discovery,
+   the defect surfaces on selection.
+
+**Verified against real artifacts**: `TestRealXDF` parses the official 42.xdf (50 tables,
+exact VE axes); end-to-end smoke run on `drive_4800.raw` + `42.xdf` produced the discovery
+listing and an 8×9 VE-axes paste block.
+
+**Gate**: gofmt/vet/build/`test -race` all green; forbidden seam diff **empty**
+(`pkg/decoder`, `pkg/ecm`, `pkg/stream`, `go.mod` and `pkg/blm` — zero change, as specced);
+decoder goldens untouched by construction.
+
+**Pattern observed** (for pattern-observer): *license-blocked ground truth* — when the real
+artifact can't be committed (redistribution unverified), pair a from-scratch structure-mirroring
+fixture (runs everywhere) with a skip-guarded real-file test (runs where the artifact exists).
+Second use of the shape after `data/xdf/` itself; candidate for a testing standard if it recurs.
+
+**Remaining before close**: verify-feature (fresh evaluator) + the two carried manual steps —
+hands-on TunerPro multiply-paste check (user, Windows box) and the V5.9.3 XML confirmation
+(user download).
+
+## PR + XML confirmation — 2026-07-11 (later)
+
+- **PR #41 opened**; CI + agent review both pass ("No blocking issues found").
+- **XML-confirmation task CLOSED**: user downloaded `$42-1227747-V5.9.3.xdf` and
+  `$42-1227747-V4T.xdf` (gearhead-efi thread 304; forum-page PDF saved as
+  `data/1227747 ECM Information $42.pdf`, gitignored). Both parse as XML (57/48 tables);
+  end-to-end export against the drive capture reproduces the same correction values as the
+  official legacy file, and V5.9.3's genuinely transposed "Main Fuel Table Corrected" (9×8,
+  X=RPM) exports correctly in its own layout — the orientation contract proven against a real
+  in-the-wild table. `TestRealXDF` is now table-driven over all three real files (`07376c8`).
+- Finding worth keeping: the three real definitions use three different VE-table titles
+  ("Main VE Table" / "Fuel VE 1 - Main Fuel Table" / "VE as % (FL1)") — community naming
+  drift that validates the explicit `-table` decision over auto-detect.
+- **Still carried to verify**: only the hands-on TunerPro multiply-paste check remains.
