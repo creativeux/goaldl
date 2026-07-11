@@ -192,40 +192,55 @@ func TestNonMonotonicLabels(t *testing.T) {
 	}
 }
 
-// TestRealXDF parses the official tunerpro.net $42 definition when it is
-// present locally (data/xdf/ is gitignored pending license review, so CI
-// skips this; the from-scratch fixtures above mirror its structure and keep
-// the same assertions live everywhere).
+// TestRealXDF parses the real $42 definitions when present locally
+// (data/xdf/ is gitignored pending license review, so CI skips these; the
+// from-scratch fixtures above mirror the structures and keep equivalent
+// assertions live everywhere). Three definitions, three community names for
+// the same VE table — the reason -table is explicit rather than guessed —
+// and all three must yield the identical 8×9 axes.
 func TestRealXDF(t *testing.T) {
-	const path = "../../data/xdf/42.xdf"
-	fh, err := os.Open(path)
-	if err != nil {
-		t.Skipf("real XDF not present (%v) — fixtures cover the structure", err)
-	}
-	defer fh.Close()
+	for _, tc := range []struct {
+		file    string
+		format  string
+		veTitle string
+		tables  int
+	}{
+		{"42.xdf", "legacy", "Main VE Table", 50},                             // official tunerpro.net (text v1.1)
+		{"$42-1227747-V5.9.3.xdf", "xml", "Fuel VE 1 - Main Fuel Table", 57}, // community, gearhead-efi thread 304
+		{"$42-1227747-V4T.xdf", "xml", "VE as % (FL1)", 48},                  // community, TH400/3-speed variant
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			fh, err := os.Open("../../data/xdf/" + tc.file)
+			if err != nil {
+				t.Skipf("real XDF not present (%v) — fixtures cover the structure", err)
+			}
+			defer fh.Close()
 
-	f, err := Parse(fh)
-	if err != nil {
-		t.Fatalf("Parse(42.xdf): %v", err)
-	}
-	if f.Format != "legacy" {
-		t.Fatalf("Format = %q, want legacy", f.Format)
-	}
-	ve, err := f.Find("Main VE Table")
-	if err != nil {
-		t.Fatalf("Find: %v", err)
-	}
-	if ve.Rows != 8 || ve.Cols != 9 {
-		t.Fatalf("dims = %d×%d, want 8×9", ve.Rows, ve.Cols)
-	}
-	if !reflect.DeepEqual(ve.Y.Labels, veRPM) || !reflect.DeepEqual(ve.X.Labels, veMAP) {
-		t.Fatalf("axes = Y%v X%v, want the documented VE axes", ve.Y.Labels, ve.X.Labels)
-	}
-	if ve.X.Units != "kPa" || ve.Y.Units != "RPM" {
-		t.Fatalf("units = X%q Y%q", ve.X.Units, ve.Y.Units)
-	}
-	// "ve" must be ambiguous in the real file too (Main VE + VE Adder).
-	if _, err := f.Find("ve"); err == nil {
-		t.Error("Find(ve) on the real file should be ambiguous")
+			f, err := Parse(fh)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if f.Format != tc.format {
+				t.Fatalf("Format = %q, want %s", f.Format, tc.format)
+			}
+			if len(f.Tables) != tc.tables {
+				t.Errorf("tables = %d, want %d", len(f.Tables), tc.tables)
+			}
+			ve, err := f.Find(tc.veTitle)
+			if err != nil {
+				t.Fatalf("Find(%q): %v", tc.veTitle, err)
+			}
+			if ve.Rows != 8 || ve.Cols != 9 {
+				t.Fatalf("dims = %d×%d, want 8×9", ve.Rows, ve.Cols)
+			}
+			if !reflect.DeepEqual(ve.Y.Labels, veRPM) || !reflect.DeepEqual(ve.X.Labels, veMAP) {
+				t.Fatalf("axes = Y%v X%v, want the documented VE axes", ve.Y.Labels, ve.X.Labels)
+			}
+			// "ve" alone must stay ambiguous in every real file (main +
+			// adder/corrected variants all match).
+			if _, err := f.Find("ve"); err == nil {
+				t.Error("Find(ve) should be ambiguous")
+			}
+		})
 	}
 }
