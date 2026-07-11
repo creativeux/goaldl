@@ -205,7 +205,7 @@ func TestRealXDF(t *testing.T) {
 		veTitle string
 		tables  int
 	}{
-		{"42.xdf", "legacy", "Main VE Table", 50},                             // official tunerpro.net (text v1.1)
+		{"42.xdf", "legacy", "Main VE Table", 50},                            // official tunerpro.net (text v1.1)
 		{"$42-1227747-V5.9.3.xdf", "xml", "Fuel VE 1 - Main Fuel Table", 57}, // community, gearhead-efi thread 304
 		{"$42-1227747-V4T.xdf", "xml", "VE as % (FL1)", 48},                  // community, TH400/3-speed variant
 	} {

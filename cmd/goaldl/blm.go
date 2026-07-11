@@ -89,6 +89,12 @@ func cmdBLM(args []string) {
 		fmt.Fprintln(os.Stderr, "-table and -paste need -xdf (the TunerPro definition the axes come from)")
 		os.Exit(1)
 	}
+	if *pasteOut != "" && *tableName == "" {
+		// Without this, -paste would fall silently into the discovery
+		// listing below and the requested file would never be written.
+		fmt.Fprintln(os.Stderr, "-paste needs -table (which table's layout should the paste block use?)")
+		os.Exit(1)
+	}
 
 	// -xdf without -table is discovery: show what the definition offers.
 	if *xdfPath != "" && *tableName == "" {
