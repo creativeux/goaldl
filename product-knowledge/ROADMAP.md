@@ -64,11 +64,12 @@ Mission: a working, cross-platform scanner/datalogger/tuning aid for GM 160-baud
 - [ ] **Session report**: post-drive one-shot summary — knock events with RPM/MAP/time context, open/closed-loop time split, under-threshold cells ("drive more at 2000 RPM / 60 kPa"), warm-up curve, extrema.
 - [ ] **Cross-session correction diff**: did the last bin change move cells toward 128? Diff two sessions' correction grids — direct feedback on whether the TunerPro edit worked.
 
-## Horizon 2: Onboard logging — ⏳ bridge first (ESP32-S3 in flight)
+## Horizon 2: Onboard logging — ⏳ bridge firmware next (ESP32-S3 arrived)
 
-**Goal**: the car logs itself; no laptop rides shotgun. Bridge path first (hardware ordered, spec held), Pi daemon later reusing the same headless features.
+**Goal**: the car logs itself; no laptop rides shotgun. Bridge path first (hardware arrived: Adafruit QT Py ESP32-S3), Pi daemon later reusing the same headless features.
 
-- [ ] **TCPProvider** — specced + held for hardware (`specs/2026-07-06_feature_tcp-provider/`): ESP32-S3 bridge streams raw bytes over WiFi/TCP; goaldl consumes via `-tcp host:port`. Implementation resumes when the S3 arrives (real-bridge validation is the ground-truth step).
+- [x] **TCPProvider** — **implemented + verified 2026-07-18** (`specs/2026-07-06_feature_tcp-provider/`, evaluation PASS): `stream.TCPProvider` + `-tcp host:port` in the dashboard and `monitor`; goaldl consumes any TCP byte source (635/635 drive-fixture frames over a local socket, byte-for-byte `.raw` interchangeability proven).
+- [ ] **Bridge firmware (Stage 1)** — ESP32-S3 UART→TCP bring-up, CircuitPython first; bench validation with the PL2303 replaying the drive capture into the S3's UART, then the car (the remaining ground-truth step for the transport).
 - [ ] `serve` adapter (HTTP/WebSocket) proving the `Session` API drives a non-terminal front-end — inherits flags/codes/grids for free from `Snapshot`
 - [ ] Phone-bracket live dashboard (gauges + BLM grid) on the `serve` adapter; Dash (big-number) view
 - [ ] **Headless record mode** (later, Pi Zero-class): daemonized `record` — start on boot, file rotation, minimal heartbeat signal; pure Go on the existing serial path

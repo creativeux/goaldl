@@ -46,3 +46,63 @@
 | philosophy: ground-truth-first | core | must | ⚠️ WARNING (by design) — in-process tests use a loopback socket, which shares the decoder's assumptions and cannot falsify them. Spec §9/§11 explicitly require real ESP32-S3 + car validation as a post-implementation step. Not blocking at spec time; **this is the reason implementation is deferred until the S3 arrives.** |
 
 **Gate decision: PROCEED** (no `❌ VIOLATION`; one intentional `⚠️ WARNING` that is the very reason for the deferral, one `ℹ️ NOTE`). Implementation is nonetheless **held by user direction** until the ESP32-S3 arrives.
+
+## Implementation (2026-07-18)
+
+- 2026-07-18: **implement-feature resumed** — the ESP32-S3 arrived (Adafruit QT Py ESP32-S3 No
+  PSRAM, enumerates as `/dev/cu.usbmodem2101`); hold released by user. Firmware track decided:
+  CircuitPython for bring-up. Task breakdown: [tasks.md](tasks.md).
+- Active capabilities: Go toolchain (build/vet/test -race), committed drive fixture as oracle,
+  in-process `net` listener for all tests (no hardware in the loop this stage).
+- 2026-07-18: **Implementation complete.** All tasks in [tasks.md](tasks.md) done; full suite
+  green under `-race`; forbidden seam untouched (`git diff` on `pkg/stream/session.go`,
+  `pkg/decoder/**`, `pkg/ecm/**`, `pkg/blm/**`, `go.mod` is empty). End-to-end smoke: a local
+  socket replaying `drive_4800.raw` through `goaldl monitor -tcp 127.0.0.1:33333 -csv …` decoded
+  **635/635 frames** — the drive capture's exact frame count.
+- Files changed: `pkg/stream/tcp.go` (new), `pkg/stream/tcp_test.go` (new, T1–T8 +
+  `replayTCPServer` helper), `cmd/goaldl/tui.go` (`byteSource`→`liveSource`, `m.serial`→`m.live`,
+  `-tcp` flag + branch + source mutual-exclusion + help), `cmd/goaldl/tui_test.go` (renames),
+  `cmd/goaldl/tcp_flags_test.go` (new, interface-satisfaction asserts + source-exclusion tests),
+  `cmd/goaldl/monitor.go` (`-tcp` flag/branch/title + mutual exclusion), `cmd/goaldl/main.go`
+  (usage), `CLAUDE.md`, `README.md`, `docs/mobile-ui.md` (Stage 0 delivered note).
+- Notable finds during implementation: (1) `monitor.go` had a latent typed-nil bug — `var sink
+  *os.File` assigned into the provider's `Sink io.Writer` meant a live monitor *without* `-o`
+  carried a non-nil interface wrapping nil and the first tee write would kill the stream; fixed
+  by declaring the variable as `io.Writer` (logged in observed-standards). (2) The source rules
+  now also reject `-p <port> <file>` (previously the file was silently ignored).
+- Deviations from spec: none of substance. `tcpHalfOpenWindows` implemented as consecutive empty
+  read windows inside `Run` (spec §3.1/§6); the consumer interface kept the spec's `liveSource`
+  name, renaming the pre-existing `byteSource`.
+- **Remaining (ground-truth-first, spec §9)**: real-bridge validation — ESP32-S3 (arrived,
+  Adafruit QT Py S3) running UART→TCP firmware (CircuitPython chosen), bench test with the
+  PL2303 replaying the drive capture into the S3's UART, then the car. Next: `verify-feature`.
+
+## Verification (2026-07-18)
+
+- **verify-feature session.** Evaluation brief assembled
+  ([evaluation-brief.md](evaluation-brief.md)); fresh context-isolated evaluator spawned
+  (filesystem-only handoff, no implementation context).
+- **Evaluator verdict: PASS** ([evaluation.md](evaluation.md)) — 0 blocking, 1 warning, 3 notes.
+  All acceptance criteria (success 1–6, R1–R12) and standards verified with evidence; evaluator
+  independently reproduced the end-to-end proof (635/635 frames via `monitor -tcp`; `-o`
+  recording `cmp`-identical to the fixture; `blm` output unchanged; all four flag-conflict paths
+  reject; cross-compiles windows/amd64 + linux/arm).
+- **Post-evaluation fixes (same session):** (1) cancel-closer goroutine no longer outlives `Run`
+  on a non-ctx exit — a `stop` channel closed on return tears it down; the vestigial `closerDone`
+  removed (evaluator notes 1–2). (2) Sibling-comparison gap closed: `TestTCPRedialNeverGivesUp`
+  added (TCP twin of `TestSerialReconnectNeverGivesUp`). Remaining follow-ups logged, not fixed:
+  the warning (cmdTUI's 5-line `-tcp` construct branch tested only indirectly — would need a
+  construction-helper refactor, deferred) and the waiting-screen zero-byte hint saying
+  "cable/port" on a TCP source (UX wording, natural candidate for the tui-ux-pass Phase E batch).
+  T1's live-re-decode oracle accepted as-is (equivalent to the golden by the decoder's own tests).
+- **Spec retrospection:** spec.md status updated to implemented; §3.3 ⟦as-built⟧ closer note,
+  §10 heading, §11 deferral→implementation record (incl. the typed-nil monitor fix and the
+  `-p <port> <file>` rejection). Standards audit: no stale code references in
+  `product-knowledge/standards/` (grep clean).
+- **Test synchronization:** no stale refs (`byteSource` fully renamed); `fakeBytes` stub matches
+  the `liveSource` contract; every new public method covered (T1–T8 + never-gives-up); sibling
+  comparison now at parity with `serial_test.go`. Full suite `go test -race -count 1 ./...`
+  green; gofmt/vet clean.
+- **Trace closed.** PROJECT_STATUS.md (Current Focus §1 + Recent Changes) and ROADMAP.md
+  (Horizon 2: TCPProvider ✅, bridge-firmware Stage 1 added) updated. Commit/PR pending user
+  go-ahead (`feat:` — pre-1.0 patch bump per versioning standard).

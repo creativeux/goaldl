@@ -76,6 +76,7 @@ Plug in the cable, find your port, and launch the dashboard:
 goaldl ports              # list serial ports — find your adapter
 goaldl -p /dev/cu.usbserial-10   # launch the dashboard, live from the car
 goaldl                    # or just this, if only one adapter is plugged in
+goaldl -tcp 192.168.4.1:3333     # or over the network, from a WiFi/Ethernet ALDL bridge
 ```
 
 Switch tabs with the number keys or `tab`; press `q` to quit. From here you can

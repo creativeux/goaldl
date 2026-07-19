@@ -1,7 +1,9 @@
 <!-- SDA: v1.0 -->
 # Technical Spec: TCPProvider
 
-**Status:** Spec complete — **implementation deferred until the ordered ESP32-S3 arrives.**
+**Status:** **Implemented + verified 2026-07-18** (ESP32-S3 arrived; hold released). Evaluator
+report: [evaluation.md](evaluation.md). As-built deltas from this spec are marked ⟦as-built⟧
+inline; remaining ground-truth step: real-bridge validation (Stage 1, firmware track).
 **Trace:** [README.md](README.md) · **Requirements:** [requirements.md](requirements.md) · **Plan:** [plan.md](plan.md)
 **Transport rationale:** [`docs/mobile-ui.md`](../../docs/mobile-ui.md)
 
@@ -102,6 +104,9 @@ A blocked `conn.Read` does not return on `ctx` cancel by itself. Two mechanisms,
   ~0, not up to `ReadTimeout`). The goroutine is started per-connection and torn down when the
   connection closes; it must not race the redial swapping `conn` (guard the current conn, or scope
   one closer goroutine per dial). Tested explicitly (§7, T4).
+  ⟦as-built⟧ One closer goroutine per `Run` (not per connection), guarding the *current* conn via
+  a 1-slot channel re-armed across redials, plus a `stop` channel closed on `Run` return so the
+  goroutine never outlives the provider on a non-ctx exit (e.g. a Sink write error).
 
 ### 3.4 Reconnect-model decision (resolves plan open-question #1)
 
@@ -266,7 +271,7 @@ consolidate-over-accrete) and is trivially promoted later if a standalone bench 
   (synthetic sources share the decoder's assumptions — the standard's core caveat). ⏳ deferred with
   the implementation.
 
-## 10. Files (when implemented — NOT this cycle)
+## 10. Files (as implemented 2026-07-18)
 
 | File | Change |
 |---|---|
@@ -281,9 +286,13 @@ consolidate-over-accrete) and is trivially promoted later if a standalone bench 
 **Forbidden seam (must stay empty in the diff):** `pkg/stream/session.go`, `pkg/decoder/**`,
 `pkg/ecm/**`, `pkg/blm/**`, `go.mod`, `go.sum`.
 
-## 11. Deferral
+## 11. Deferral → implementation
 
-Per user direction: **spec only.** Implementation waits on the ESP32-S3 (ordered) so that Stage 1/2
-bring-up (firmware over the wire, then at the car) can validate the provider against a real bridge —
-honoring ground-truth-first rather than shipping a transport proven only on a loopback socket. When
-ready, run `implement-feature` against this spec.
+Originally spec-only per user direction; the ESP32-S3 (Adafruit QT Py ESP32-S3) arrived
+2026-07-18 and the hold was released. Implemented and independently verified the same day
+([evaluation.md](evaluation.md): PASS, 0 blocking). As-built deltas beyond §3.3's closer note:
+`cmd/goaldl/tcp_flags_test.go` carries the consumer-side interface asserts + source-exclusion
+tests; the source rules also reject `-p <port> <file>` (previously silently ignored); and fixing
+monitor's sink to `var sink io.Writer` removed a latent typed-nil bug (live monitor without `-o`
+would kill the stream on the first tee write). The ground-truth-first Stage 1/2 bring-up
+(firmware over the wire, then at the car) remains the required real-bridge validation.

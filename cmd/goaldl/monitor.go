@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -20,11 +21,13 @@ import (
 // driven by either a live ECM (-p) or a replayed capture file. Both paths feed
 // the identical decode → parse → table pipeline.
 //
-//	goaldl monitor -p /dev/cu.usbserial-10 [-o capture.raw] [-csv frames.csv]   # live
+//	goaldl monitor -p /dev/cu.usbserial-10 [-o capture.raw] [-csv frames.csv]   # live serial
+//	goaldl monitor -tcp 192.168.4.1:3333 [-o capture.raw] [-csv frames.csv]     # live bridge
 //	goaldl monitor drive_4800.raw [-speed 2] [-csv frames.csv]                  # replay
 func cmdMonitor(args []string) {
 	fs := flag.NewFlagSet("monitor", flag.ExitOnError)
 	portName := fs.String("p", "", "Live: serial port to read from (omit to replay a file)")
+	tcpAddr := fs.String("tcp", "", "Live: TCP host:port of an ALDL bridge (mutually exclusive with -p)")
 	baudRate := fs.Int("b", 4800, "UART sampling baud rate")
 	ecmPart := fs.String("e", defaultECM, "ECM part number")
 	promID := fs.Int("prom", 6291, "Expected PROM ID for the sync indicator (0 to disable)")
@@ -50,8 +53,20 @@ func cmdMonitor(args []string) {
 	var provider stream.Provider
 	var title string
 
-	if *portName != "" {
-		var sink *os.File
+	// A source is exactly one of: serial port (-p), bridge (-tcp), capture file.
+	if *portName != "" && *tcpAddr != "" {
+		fmt.Fprintln(os.Stderr, "Give one live source: -p (serial) or -tcp (bridge), not both")
+		os.Exit(1)
+	}
+	if (*portName != "" || *tcpAddr != "") && fs.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "Give one source: a live flag (-p/-tcp) or a capture file, not both (got %q)\n", fs.Arg(0))
+		os.Exit(1)
+	}
+
+	if *portName != "" || *tcpAddr != "" {
+		// sink is an io.Writer, not *os.File: a typed-nil *os.File assigned to
+		// the provider's io.Writer field would read as non-nil and enable the tee.
+		var sink io.Writer
 		if *record != "" {
 			f, err := os.Create(*record)
 			if err != nil {
@@ -61,14 +76,19 @@ func cmdMonitor(args []string) {
 			defer f.Close()
 			sink = f
 		}
-		provider = &stream.SerialProvider{Port: *portName, Baud: *baudRate, Config: cfg, Sink: sink}
-		title = "goaldl monitor — live " + *portName
+		if *portName != "" {
+			provider = &stream.SerialProvider{Port: *portName, Baud: *baudRate, Config: cfg, Sink: sink}
+			title = "goaldl monitor — live " + *portName
+		} else {
+			provider = &stream.TCPProvider{Addr: *tcpAddr, Config: cfg, Sink: sink}
+			title = "goaldl monitor — bridge " + *tcpAddr
+		}
 		if *record != "" {
 			title += " (recording " + *record + ")"
 		}
 	} else {
 		if fs.NArg() < 1 {
-			fmt.Fprintln(os.Stderr, "Usage: goaldl monitor -p <port>   |   goaldl monitor <capture.raw>")
+			fmt.Fprintln(os.Stderr, "Usage: goaldl monitor -p <port> | -tcp <host:port>   |   goaldl monitor <capture.raw>")
 			os.Exit(1)
 		}
 		inName := fs.Arg(0)

@@ -39,6 +39,7 @@ type tuiFlags struct {
 	promID     int
 	minSamples int
 	portName   string
+	tcpAddr    string // "host:port" of an ALDL bridge (empty unless -tcp)
 	inName     string // capture file (empty for live)
 	speed      float64
 }
@@ -50,6 +51,7 @@ type tuiFlags struct {
 func resolveTUIFlags(args []string) (*tuiFlags, error) {
 	fs := flag.NewFlagSet("goaldl", flag.ContinueOnError)
 	portName := fs.String("p", "", "Live: serial port to read from (omit to replay a file)")
+	tcpAddr := fs.String("tcp", "", "Live: TCP host:port of an ALDL bridge (mutually exclusive with -p)")
 	baudRate := fs.Int("b", 4800, "UART sampling baud rate")
 	ecmPart := fs.String("e", defaultECM, "ECM part number")
 	promID := fs.Int("prom", 6291, "Expected PROM ID for the sync indicator (0 to disable)")
@@ -62,11 +64,16 @@ func resolveTUIFlags(args []string) (*tuiFlags, error) {
 		return nil, err
 	}
 
+	// A source is exactly one of: serial port (-p), bridge (-tcp), capture file.
+	if *portName != "" && *tcpAddr != "" {
+		return nil, errors.New("give one live source: -p (serial) or -tcp (bridge), not both")
+	}
+
 	// Resolve the capture filename (if any) and re-parse flags that trail it.
 	// This must happen before any flag value is read below — otherwise trailing
 	// flags would be silently ignored (defaults applied) for everything below.
 	var inName string
-	if *portName == "" {
+	if *portName == "" && *tcpAddr == "" {
 		if fs.NArg() < 1 {
 			return nil, errNoTUISource
 		}
@@ -74,6 +81,8 @@ func resolveTUIFlags(args []string) (*tuiFlags, error) {
 		if err := fs.Parse(fs.Args()[1:]); err != nil { // allow flags after the filename
 			return nil, err
 		}
+	} else if fs.NArg() > 0 {
+		return nil, fmt.Errorf("give one source: a live flag (-p/-tcp) or a capture file, not both (got %q)", fs.Arg(0))
 	}
 
 	registry := ecm.NewRegistry()
@@ -91,6 +100,7 @@ func resolveTUIFlags(args []string) (*tuiFlags, error) {
 		promID:     *promID,
 		minSamples: *minSamples,
 		portName:   *portName,
+		tcpAddr:    *tcpAddr,
 		inName:     inName,
 		speed:      *speed,
 	}, nil
@@ -99,16 +109,19 @@ func resolveTUIFlags(args []string) (*tuiFlags, error) {
 // cmdTUI launches the interactive dashboard — the default face of goaldl. It
 // navigates between the sensor table, the BLM grid, the flag-data and
 // error-code views, and a scrolling raw-byte history, driven by a
-// stream.Session over either a live ECM (-p) or a replayed capture.
+// stream.Session over a live ECM (-p), a TCP bridge (-tcp), or a replayed
+// capture.
 //
 //	goaldl -p /dev/cu.usbserial-10
+//	goaldl -tcp 192.168.4.1:3333
 //	goaldl drive_4800.raw [-speed 2]
 func cmdTUI(args []string) {
 	cfg, err := resolveTUIFlags(args)
 	if err != nil {
 		if errors.Is(err, errNoTUISource) {
-			fmt.Fprintln(os.Stderr, "No source. Give a port or a capture file:")
+			fmt.Fprintln(os.Stderr, "No source. Give a port, a bridge address, or a capture file:")
 			fmt.Fprintln(os.Stderr, "  goaldl -p /dev/cu.usbserial-10")
+			fmt.Fprintln(os.Stderr, "  goaldl -tcp 192.168.4.1:3333")
 			fmt.Fprintln(os.Stderr, "  goaldl drive_4800.raw")
 			if ports, perr := serial.AvailablePorts(); perr == nil && len(ports) > 0 {
 				fmt.Fprintf(os.Stderr, "\nDetected ports (pass one with -p, or run 'goaldl' on a terminal to pick):\n")
@@ -129,11 +142,16 @@ func cmdTUI(args []string) {
 	var provider stream.Provider
 	var replay *stream.ReplayProvider
 	var serial *stream.SerialProvider
+	var tcpProv *stream.TCPProvider
 	var recSink *stream.RecordSink
 	if cfg.portName != "" {
 		recSink = &stream.RecordSink{}
 		serial = &stream.SerialProvider{Port: cfg.portName, Baud: cfg.cfg.BaudRate, Config: cfg.cfg, Sink: recSink}
 		provider = serial
+	} else if cfg.tcpAddr != "" {
+		recSink = &stream.RecordSink{}
+		tcpProv = &stream.TCPProvider{Addr: cfg.tcpAddr, Config: cfg.cfg, Sink: recSink}
+		provider = tcpProv
 	} else {
 		data, err := os.ReadFile(cfg.inName)
 		if err != nil {
@@ -191,8 +209,13 @@ func cmdTUI(args []string) {
 		mins:        map[string]float64{},
 		maxs:        map[string]float64{},
 	}
+	// Guarded assignments: a nil concrete pointer must not become a non-nil
+	// liveSource interface.
 	if serial != nil {
-		m.serial = serial // guarded: a nil *SerialProvider must not become a non-nil interface
+		m.live = serial
+	}
+	if tcpProv != nil {
+		m.live = tcpProv
 	}
 	final, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	cancel()
@@ -357,12 +380,12 @@ const (
 	knockFreeFrac   = 0.5
 )
 
-// byteSource exposes the live provider's status the dashboard polls between
+// liveSource exposes the live provider's status the dashboard polls between
 // snapshots: the raw-byte counter (waiting-screen cable-vs-config diagnostic)
-// and whether it is reconnecting after a dropped cable. Satisfied by
-// *stream.SerialProvider; an interface so tests can stub it (there is no
-// serial-port fake). nil on a replay source.
-type byteSource interface {
+// and whether it is reconnecting after a dropped cable or connection.
+// Satisfied by *stream.SerialProvider and *stream.TCPProvider; an interface so
+// tests can stub it (there is no serial-port fake). nil on a replay source.
+type liveSource interface {
 	Bytes() int64
 	Reconnecting() bool
 	ReconnectAttempt() int
@@ -378,7 +401,7 @@ type tuiModel struct {
 	cancel      context.CancelFunc
 	replay      *stream.ReplayProvider // pause/speed/seek handle (nil when live)
 	replayTotal time.Duration          // capture length, read once (0 when live)
-	serial      byteSource             // live raw-byte counter for diagnostics (nil when replay)
+	live        liveSource             // live raw-byte counter for diagnostics (nil when replay)
 	recSink     *stream.RecordSink     // raw-capture tee (nil when replay)
 
 	// state
@@ -430,7 +453,7 @@ type tuiModel struct {
 	now         time.Time
 
 	// live byte diagnostics (waiting screen, D.3): bytesSeen is the running total
-	// read from m.serial.Bytes(), sampled on the tick; byteRate is the delta over
+	// read from m.live.Bytes(), sampled on the tick; byteRate is the delta over
 	// the last tick. The tick is 1s (see tick()), so byteRate reads as B/s — if the
 	// tick cadence ever changes, divide by its period before labelling it a rate.
 	// Used only before the first frame syncs, to tell "no bytes at all" (cable)
@@ -672,9 +695,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.now = time.Time(msg)
-		if m.serial != nil {
+		if m.live != nil {
 			// Sample the raw byte counter so the waiting screen can show a rate.
-			b := m.serial.Bytes()
+			b := m.live.Bytes()
 			m.byteRate = b - m.bytesSeen
 			m.bytesSeen = b
 		}
@@ -1441,10 +1464,10 @@ const reconnectEscalate = 5
 // replace the dashboard: a live source that is reconnecting and has either never
 // seen a frame (startup, no port yet) or been out long enough to escalate.
 func (m tuiModel) waitingForPort() bool {
-	if m.serial == nil || !m.serial.Reconnecting() {
+	if m.live == nil || !m.live.Reconnecting() {
 		return false
 	}
-	return !m.hasFrame || m.serial.ReconnectAttempt() > reconnectEscalate
+	return !m.hasFrame || m.live.ReconnectAttempt() > reconnectEscalate
 }
 
 func (m tuiModel) View() string {
@@ -1478,12 +1501,12 @@ func (m tuiModel) View() string {
 	if m.done {
 		status += "   " + dimStyle.Render("(stream ended)")
 	}
-	if m.serial != nil && m.serial.Reconnecting() {
+	if m.live != nil && m.live.Reconnecting() {
 		// A dropped cable is being retried in the background (not a fatal error).
 		// This is the more specific signal, so it stands in for the stale age. The
 		// full waiting screen takes over once the outage passes reconnectEscalate
 		// (see View); this inline form covers the brief blip before that.
-		status += "   " + beatWarn.Render(fmt.Sprintf("⟳ reconnecting… %d", m.serial.ReconnectAttempt()))
+		status += "   " + beatWarn.Render(fmt.Sprintf("⟳ reconnecting… %d", m.live.ReconnectAttempt()))
 	} else if stale, age := m.stale(); stale {
 		status += "   " + beatBad.Render(fmt.Sprintf("no data %.0fs", age.Seconds()))
 	}
@@ -1577,7 +1600,7 @@ func (m tuiModel) fitWidth(s string) string {
 // decode config (baud / polarity), with the rate shown so a number near the
 // known-good ~159 B/s idle strongly implies polarity/baud.
 func (m tuiModel) waitingBody() string {
-	if m.serial == nil {
+	if m.live == nil {
 		return dimStyle.Render("\n  waiting for frames…")
 	}
 	if m.bytesSeen == 0 {
@@ -2008,8 +2031,8 @@ func (m tuiModel) errorPanel() string {
 func (m tuiModel) waitingForPortPanel() string {
 	var b strings.Builder
 	attempt := 0
-	if m.serial != nil {
-		attempt = m.serial.ReconnectAttempt()
+	if m.live != nil {
+		attempt = m.live.ReconnectAttempt()
 	}
 	if m.hasFrame {
 		fmt.Fprintf(&b, "\n  %s\n\n", beatWarn.Render("⟳ Connection to "+m.source+" lost"))
