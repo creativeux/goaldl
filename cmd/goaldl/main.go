@@ -79,6 +79,7 @@ func printUsage() {
 	fmt.Println()
 	fmt.Println("Interactive dashboard (default) — sensors · fuel-trim grids · flags · codes · raw:")
 	fmt.Println("  goaldl -p /dev/cu.usbserial-10     live from the ECM")
+	fmt.Println("  goaldl -tcp 192.168.4.1:3333       live from a TCP bridge (ESP32)")
 	fmt.Println("  goaldl drive_4800.raw              replay a capture")
 	fmt.Println("  goaldl                             auto-connect if one USB serial port is present")
 	fmt.Println("  keys: 1-8 select tab · tab/←→ cycle · s save · c clear · r rec · d csv · space/± replay · q quit")

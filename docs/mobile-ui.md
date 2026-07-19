@@ -116,6 +116,9 @@ any mobile app exists** — the cheapest way to validate the bridge with tooling
 **Go-side change:** one new `TCPProvider` beside `SerialProvider`/`ReplayProvider` (serves desktop
 and, via the byte-push binding, mobile; a `BLEProvider` shape only if/when BLE is added), emitting
 the same `FrameEvent` stream. Decoder/ecm/blm/Session untouched.
+**Status: Stage 0 delivered** — `stream.TCPProvider` + the `-tcp host:port` source in the
+dashboard and `monitor` shipped per `specs/2026-07-06_feature_tcp-provider/`; desktop `goaldl`
+consumes any TCP byte source today. Next: bridge firmware bring-up on the bench (Stage 1).
 
 **Why not run goaldl on the ESP32 itself:** standard Go doesn't target Xtensa (no bare-metal
 RISC-V `GOOS` for the C3 either); TinyGo's ESP32 support is experimental with weak BLE/WiFi.

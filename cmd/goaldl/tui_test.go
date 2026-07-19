@@ -1188,7 +1188,7 @@ func TestTUIReplayKeys(t *testing.T) {
 	_ = uc
 }
 
-// fakeBytes is a stub byteSource for the waiting-screen diagnostics and the
+// fakeBytes is a stub liveSource for the waiting-screen diagnostics and the
 // reconnect indicator (there is no serial-port fake). Its fields are set
 // directly by the test.
 type fakeBytes struct {
@@ -1207,7 +1207,7 @@ func (f *fakeBytes) ReconnectAttempt() int { return f.attempt }
 func TestWaitingDiagnostics(t *testing.T) {
 	// Live, no bytes yet → cable/port hint.
 	m := testModel()
-	m.serial = &fakeBytes{}
+	m.live = &fakeBytes{}
 	if body := m.waitingBody(); !strings.Contains(body, "no bytes yet") || !strings.Contains(body, "cable") {
 		t.Errorf("zero-byte waiting body = %q, want a cable/port hint", body)
 	}
@@ -1234,12 +1234,12 @@ func TestWaitingDiagnostics(t *testing.T) {
 	}
 }
 
-// TestSerialBytes: the tick handler samples the byteSource, updating bytesSeen
+// TestSerialBytes: the tick handler samples the liveSource, updating bytesSeen
 // and the per-tick rate the waiting screen reads.
 func TestSerialBytes(t *testing.T) {
 	fb := &fakeBytes{}
 	m := testModel()
-	m.serial = fb
+	m.live = fb
 
 	fb.n = 159
 	n1, _ := m.Update(tickMsg(time.Unix(1, 0)))
@@ -1272,7 +1272,7 @@ func TestTUIHeaderVersion(t *testing.T) {
 func TestTUIReconnectIndicator(t *testing.T) {
 	m := testModel()
 	fb := &fakeBytes{reconnecting: true, attempt: 3} // ≤ reconnectEscalate → inline
-	m.serial = fb
+	m.live = fb
 	m.hasFrame = true
 	m.hasGood = true
 	// Make it look stale too, so we prove reconnect takes precedence over "no data".
@@ -1311,7 +1311,7 @@ func TestTUIReconnectIndicator(t *testing.T) {
 func TestTUIWaitingForPort(t *testing.T) {
 	// Startup: never seen a frame → "Waiting for" screen.
 	start := testModel()
-	start.serial = &fakeBytes{reconnecting: true, attempt: 1}
+	start.live = &fakeBytes{reconnecting: true, attempt: 1}
 	start.width, start.height = 100, 30
 	if v := start.View(); !strings.Contains(v, "Waiting for") {
 		t.Errorf("startup-with-no-port should show the waiting screen:\n%s", v)
@@ -1323,7 +1323,7 @@ func TestTUIWaitingForPort(t *testing.T) {
 	// Escalated mid-session outage: had a frame, attempt past the threshold →
 	// "Connection … lost" screen (grids preserved, not a fresh model).
 	lost := testModel()
-	lost.serial = &fakeBytes{reconnecting: true, attempt: reconnectEscalate + 1}
+	lost.live = &fakeBytes{reconnecting: true, attempt: reconnectEscalate + 1}
 	lost.hasFrame = true
 	lost.hasGood = true
 	lost.width, lost.height = 100, 30
@@ -1332,7 +1332,7 @@ func TestTUIWaitingForPort(t *testing.T) {
 	}
 
 	// Recovery: a frame arrives → back to the dashboard.
-	lost.serial = &fakeBytes{reconnecting: false}
+	lost.live = &fakeBytes{reconnecting: false}
 	if v := lost.View(); strings.Contains(v, "Waiting for") || strings.Contains(v, "Connection") {
 		t.Error("dashboard should return once reconnected")
 	}
