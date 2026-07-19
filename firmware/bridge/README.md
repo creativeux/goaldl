@@ -94,6 +94,8 @@ definitions would arrive). Build the universal connector; ship the 160-baud feat
 
 ## Wiring diagram
 
-A rendered schematic (domains, waveforms, pinout, bench variant, parts list) is
-published as an artifact; the ASCII schematic above is the canonical in-repo version.
+[`wiring.html`](wiring.html) is the rendered schematic sheet — voltage-domain schematic,
+signal waveforms, connector pinout, bench variant, generation-comparison table, and the
+parts list. Self-contained HTML (no external assets, light/dark aware): open it in any
+browser. The ASCII schematic above is the quick in-terminal version of the same circuit.
 Parts: Q1 2N3904 (any small NPN), R1/R2 10kΩ, R3 100kΩ optional.
