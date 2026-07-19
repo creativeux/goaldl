@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.1.3](https://github.com/creativeux/goaldl/compare/v0.1.2...v0.1.3) (2026-07-19)
+
+
+### Features
+
+* ESP32-S3 ALDL bridge firmware (CircuitPython UART→TCP) ([#43](https://github.com/creativeux/goaldl/issues/43)) ([5a644f5](https://github.com/creativeux/goaldl/commit/5a644f5e8f05f5b6493d5389cbcc3dcc9fa71cd7))
+* TCPProvider — consume the ALDL byte stream over a TCP bridge (-tcp) ([#42](https://github.com/creativeux/goaldl/issues/42)) ([29d5d1c](https://github.com/creativeux/goaldl/commit/29d5d1c856978104cb97970bf821b84849e1152a))
+* XDF-aware correction export for TunerPro paste ([#41](https://github.com/creativeux/goaldl/issues/41)) ([369083d](https://github.com/creativeux/goaldl/commit/369083d6718140bd8fe94a57e4c9fa3236db6087))
+
+
+### Bug Fixes
+
+* publish verdict from a comment marker in a deterministic step ([#32](https://github.com/creativeux/goaldl/issues/32)) ([11be72c](https://github.com/creativeux/goaldl/commit/11be72c8e036bce2dc3441ad19cfeb298d1c103d))
+* review agent publishes its own commit status ([#29](https://github.com/creativeux/goaldl/issues/29)) ([da0d800](https://github.com/creativeux/goaldl/commit/da0d800fbf2e4c4e3111cf2322cb88d9a9d2db1c))
+* stop the agent's own comment from cancelling its review run ([#35](https://github.com/creativeux/goaldl/issues/35)) ([2be2ad4](https://github.com/creativeux/goaldl/commit/2be2ad4bd027395eef62438829993413e653f791))
+
 ## [0.1.2](https://github.com/creativeux/goaldl/compare/v0.1.1...v0.1.2) (2026-07-06)
 
 
