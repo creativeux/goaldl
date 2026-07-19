@@ -20,16 +20,21 @@ frame sync itself.
 | `BRIDGE_PORT` | `3333` | TCP listen port |
 | `BRIDGE_TEST` | `"1"` | `1` = serve synthetic, correctly-encoded 1227747 idle frames at the real ~160 B/s (validates the whole WiFi/TCP/decoder path with zero wiring); `0` = read the real UART |
 
-Status LED: yellow = starting · blue = up, waiting for a client · green = client
-connected · red blink = client dropped. (Requires the `neopixel` library; the firmware
-runs fine without it, just dark.)
+Status LED: yellow = starting · red/yellow blink = station-mode join failing (bad
+password or network out of range; retries every 3 s) · blue = up, waiting for a client ·
+green = client connected · red blink = client dropped. (Requires the `neopixel` library;
+the firmware runs fine without it, just dark.)
+
+**Known limitation (station mode):** the join retry covers startup only — if the joined
+network drops mid-session, the bridge needs a power cycle. Irrelevant in AP mode (the
+default in the car), where the bridge *is* the network.
 
 ## Validation log
 
 - **2026-07-18 — WiFi/TCP leg proven** (no wiring): `BRIDGE_TEST=1`, station mode on the
   bench LAN; `goaldl monitor -tcp <ip>:3333` decoded the synthetic stream with PROM 6291
   matching (`prom_ok=true`), correct idle sensor values, and ~1.17 s frame cadence
-  (real ECM: ~1.18 s). Desktop side: `stream.TCPProvider`, PR #41-follow-on
+  (real ECM: ~1.18 s). Desktop side: `stream.TCPProvider`, merged as PR #42
   (`specs/2026-07-06_feature_tcp-provider/`).
 - **2026-07-19 — review-hardening pass** (agent PR review findings): client sends are
   bounded (`settimeout(2)`) so a wedged-but-open peer degrades to a normal client-drop

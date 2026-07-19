@@ -179,7 +179,13 @@ while True:
     if data:
         if client is not None:
             try:
-                client.send(data)
+                # send() may short-write; loop on its return value so a stall
+                # either delivers everything or raises (settimeout above) —
+                # bytes must never silently vanish mid-stream.
+                view = memoryview(data)
+                while view:
+                    n = client.send(view)
+                    view = view[n:]
                 sent += len(data)
             except OSError:
                 print("bridge: client dropped after", sent, "bytes")
