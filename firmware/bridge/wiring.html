@@ -1,0 +1,425 @@
+<title>ALDL → ESP32 bridge: input conditioning</title>
+<style>
+  :root {
+    --bg: #F4F5F2;
+    --panel: #FCFCFA;
+    --line: #D8DCD4;
+    --ink: #242A2F;
+    --muted: #5C666E;
+    --copper: #B45430;
+    --rail: #3A6EA8;
+    --amber: #AD7B24;
+    --amber-zone: rgba(173, 123, 36, 0.07);
+    --rail-zone: rgba(58, 110, 168, 0.06);
+    --gnd: #78828A;
+    --sans: "Seravek", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", "Menlo", "Cascadia Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #15191C;
+      --panel: #1C2226;
+      --line: #313A40;
+      --ink: #E4E8E3;
+      --muted: #97A1A8;
+      --copper: #E08256;
+      --rail: #6FA3D8;
+      --amber: #D2A24C;
+      --amber-zone: rgba(210, 162, 76, 0.08);
+      --rail-zone: rgba(111, 163, 216, 0.07);
+      --gnd: #8A939B;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #15191C;
+    --panel: #1C2226;
+    --line: #313A40;
+    --ink: #E4E8E3;
+    --muted: #97A1A8;
+    --copper: #E08256;
+    --rail: #6FA3D8;
+    --amber: #D2A24C;
+    --amber-zone: rgba(210, 162, 76, 0.08);
+    --rail-zone: rgba(111, 163, 216, 0.07);
+    --gnd: #8A939B;
+  }
+  :root[data-theme="light"] {
+    --bg: #F4F5F2;
+    --panel: #FCFCFA;
+    --line: #D8DCD4;
+    --ink: #242A2F;
+    --muted: #5C666E;
+    --copper: #B45430;
+    --rail: #3A6EA8;
+    --amber: #AD7B24;
+    --amber-zone: rgba(173, 123, 36, 0.07);
+    --rail-zone: rgba(58, 110, 168, 0.06);
+    --gnd: #78828A;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.55;
+    margin: 0;
+    padding: 2.5rem 1.25rem 4rem;
+  }
+  main { max-width: 880px; margin: 0 auto; }
+
+  header { margin-bottom: 2rem; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--copper);
+    margin: 0 0 0.5rem;
+  }
+  h1 {
+    font-size: clamp(1.5rem, 4vw, 2.1rem);
+    line-height: 1.15;
+    margin: 0 0 0.6rem;
+    text-wrap: balance;
+    font-weight: 600;
+  }
+  .lede { color: var(--muted); max-width: 62ch; margin: 0; }
+
+  h2 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    margin: 2.6rem 0 0.9rem;
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+  }
+  h2 .tag {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 1rem;
+    overflow-x: auto;
+  }
+  .panel svg { display: block; min-width: 720px; width: 100%; height: auto; }
+  .panel.narrow svg { min-width: 540px; }
+  figcaption {
+    font-size: 0.82rem;
+    color: var(--muted);
+    margin-top: 0.75rem;
+    max-width: 70ch;
+  }
+  figure { margin: 0; }
+
+  /* SVG classes */
+  .wire { stroke: var(--ink); stroke-width: 2; fill: none; }
+  .sig { stroke: var(--copper); stroke-width: 2.25; fill: none; }
+  .railw { stroke: var(--rail); stroke-width: 2.25; fill: none; }
+  .gndw { stroke: var(--gnd); stroke-width: 2.25; fill: none; }
+  .comp { stroke: var(--ink); stroke-width: 2; fill: none; }
+  .boxfill { fill: var(--panel); stroke: var(--ink); stroke-width: 1.5; }
+  .dot { fill: var(--ink); }
+  .lbl { font-family: var(--mono); font-size: 13px; fill: var(--ink); }
+  .lbl-m { font-family: var(--mono); font-size: 12px; fill: var(--muted); }
+  .lbl-c { font-family: var(--mono); font-size: 13px; fill: var(--copper); font-weight: 600; }
+  .lbl-r { font-family: var(--mono); font-size: 13px; fill: var(--rail); font-weight: 600; }
+  .lbl-g { font-family: var(--mono); font-size: 12px; fill: var(--gnd); }
+  .lbl-a { font-family: var(--mono); font-size: 11px; fill: var(--amber); letter-spacing: 0.12em; font-weight: 600; }
+  .lbl-b { font-family: var(--mono); font-size: 11px; fill: var(--rail); letter-spacing: 0.12em; font-weight: 600; }
+  .zone-12 { fill: var(--amber-zone); }
+  .zone-33 { fill: var(--rail-zone); }
+  .split { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 5 5; }
+  .wave-in { stroke: var(--amber); stroke-width: 2.25; fill: none; }
+  .wave-out { stroke: var(--copper); stroke-width: 2.25; fill: none; }
+  .gridline { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
+  .pincell { fill: var(--panel); stroke: var(--ink); stroke-width: 1.25; }
+  .pincell-hot { fill: var(--amber-zone); stroke: var(--copper); stroke-width: 2; }
+  .pincell-gnd { fill: var(--rail-zone); stroke: var(--gnd); stroke-width: 2; }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.9rem;
+    font-variant-numeric: tabular-nums;
+  }
+  th, td {
+    text-align: left;
+    padding: 0.55rem 0.9rem 0.55rem 0;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  th {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  td.part { font-family: var(--mono); white-space: nowrap; }
+
+  .notes { margin: 1rem 0 0; padding-left: 1.2rem; }
+  .notes li { margin-bottom: 0.55rem; max-width: 70ch; }
+  .notes li::marker { color: var(--copper); }
+  code {
+    font-family: var(--mono);
+    font-size: 0.86em;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0.08em 0.35em;
+  }
+  .callout {
+    border-left: 3px solid var(--amber);
+    padding: 0.15rem 0 0.15rem 1rem;
+    color: var(--muted);
+    font-size: 0.9rem;
+    max-width: 68ch;
+    margin: 1.1rem 0 0;
+  }
+</style>
+
+<main>
+  <header>
+    <p class="eyebrow">goaldl · bridge hardware · stage 2</p>
+    <h1>ALDL → ESP32 input conditioning</h1>
+    <p class="lede">One transistor stands between the car's 12V-domain data line and the
+    QT Py's 3.3V-only RX pin. It clamps the voltage <em>and</em> inverts the signal — the
+    same two jobs the PL2303 cable's internal circuit does today, so the bytes come out
+    identical to a serial capture.</p>
+  </header>
+
+  <h2>The circuit <span class="tag">2 wires from the car, 3 pins on the board</span></h2>
+  <figure>
+    <div class="panel">
+      <svg viewBox="0 0 940 400" role="img" aria-label="Schematic: ALDL pin E through a 10 kilohm resistor to the base of a 2N3904 NPN transistor; emitter to shared ground; collector pulled up to 3.3 volts through 10 kilohms and wired to the ESP32 RX pin; optional 100 kilohm base pulldown.">
+        <!-- domain zones -->
+        <rect class="zone-12" x="10" y="10" width="490" height="380" rx="4"/>
+        <rect class="zone-33" x="500" y="10" width="420" height="380" rx="4"/>
+        <line class="split" x1="500" y1="10" x2="500" y2="390"/>
+        <text class="lbl-a" x="26" y="34">CAR · 12V DOMAIN</text>
+        <text class="lbl-b" x="770" y="34">BRIDGE · 3.3V ONLY</text>
+
+        <!-- ALDL connector box -->
+        <rect class="boxfill" x="34" y="110" width="88" height="250" rx="4"/>
+        <text class="lbl" x="48" y="140">ALDL</text>
+        <text class="lbl-m" x="48" y="158">under</text>
+        <text class="lbl-m" x="48" y="174">dash</text>
+        <text class="lbl-c" x="96" y="216">E</text>
+        <text class="lbl-g" x="96" y="336">A</text>
+
+        <!-- ESP32 box -->
+        <rect class="boxfill" x="812" y="40" width="112" height="320" rx="4"/>
+        <text class="lbl" x="830" y="70">QT Py</text>
+        <text class="lbl" x="830" y="88">ESP32-S3</text>
+        <text class="lbl-r" x="822" y="126">3V</text>
+        <text class="lbl-c" x="822" y="186">RX</text>
+        <text class="lbl-g" x="822" y="336">GND</text>
+
+        <!-- signal: pin E -> R1 -> base node -->
+        <line class="sig" x1="122" y1="210" x2="196" y2="210"/>
+        <!-- R1 zigzag -->
+        <path class="sig" d="M196,210 l8,0 l6,-11 l12,22 l12,-22 l12,22 l12,-22 l6,11 l8,0"/>
+        <text class="lbl" x="204" y="188">R1 10kΩ</text>
+        <line class="sig" x1="272" y1="210" x2="360" y2="210"/>
+        <circle class="dot" cx="360" cy="210" r="4"/>
+        <line class="sig" x1="360" y1="210" x2="547" y2="210"/>
+
+        <!-- R3 optional pulldown from base node -->
+        <line class="wire" x1="360" y1="210" x2="360" y2="248"/>
+        <path class="wire" d="M360,248 l0,6 l-11,6 l22,12 l-22,12 l22,12 l-22,12 l11,6 l0,6"/>
+        <line class="wire" x1="360" y1="320" x2="360" y2="332"/>
+        <circle class="dot" cx="360" cy="332" r="4"/>
+        <text class="lbl-m" x="378" y="278">R3 100kΩ</text>
+        <text class="lbl-m" x="378" y="294">(optional)</text>
+
+        <!-- transistor Q1 -->
+        <circle class="comp" cx="585" cy="210" r="40"/>
+        <line class="comp" x1="565" y1="184" x2="565" y2="236" stroke-width="3"/>
+        <!-- collector: up-right -->
+        <line class="comp" x1="565" y1="196" x2="596" y2="176"/>
+        <line class="comp" x1="596" y1="176" x2="596" y2="160"/>
+        <!-- emitter: down-right with arrow -->
+        <line class="comp" x1="565" y1="224" x2="596" y2="244"/>
+        <polygon fill="var(--ink)" points="596,244 583,241 590,231"/>
+        <line class="comp" x1="596" y1="244" x2="596" y2="262"/>
+        <text class="lbl" x="628" y="216">Q1</text>
+        <text class="lbl-m" x="628" y="232">2N3904</text>
+
+        <!-- collector node up to R2 and right to RX -->
+        <line class="sig" x1="596" y1="160" x2="596" y2="148"/>
+        <circle class="dot" cx="596" cy="148" r="4"/>
+        <line class="sig" x1="596" y1="148" x2="596" y2="136"/>
+        <!-- R2 vertical zigzag 596: y 136 -> 64 -->
+        <path class="railw" d="M596,136 l0,-6 l-11,-6 l22,-12 l-22,-12 l22,-12 l-22,-12 l11,-6 l0,-6"/>
+        <text class="lbl-r" x="616" y="104">R2 10kΩ</text>
+        <line class="railw" x1="596" y1="64" x2="596" y2="52"/>
+        <!-- 3.3V rail to ESP32 3V pin -->
+        <line class="railw" x1="596" y1="52" x2="596" y2="120"  visibility="hidden"/>
+        <path class="railw" d="M596,52 L780,52 L780,120 L812,120"/>
+        <text class="lbl-r" x="640" y="44">3.3V rail</text>
+        <!-- RX wire -->
+        <line class="sig" x1="596" y1="148" x2="700" y2="148"/>
+        <path class="sig" d="M700,148 L700,180 L812,180"/>
+        <text class="lbl-c" x="712" y="170">to RX</text>
+
+        <!-- emitter to ground rail -->
+        <line class="gndw" x1="596" y1="262" x2="596" y2="332"/>
+        <circle class="dot" cx="596" cy="332" r="4"/>
+
+        <!-- ground rail -->
+        <line class="gndw" x1="122" y1="332" x2="812" y2="332"/>
+        <text class="lbl-g" x="420" y="354">shared ground — car GND and board GND must be common</text>
+      </svg>
+    </div>
+    <figcaption>The dashed line is the whole point: everything left of it may see car
+    voltages; R1 limits base current so even a 12V transient is harmless, and the RX pin
+    only ever sees 0–3.3V from its own pull-up. R3 keeps Q1 firmly off if the line ever
+    floats; the circuit works without it.</figcaption>
+  </figure>
+
+  <h2>What it does to the signal <span class="tag">clamp + invert</span></h2>
+  <figure>
+    <div class="panel narrow">
+      <svg viewBox="0 0 720 190" role="img" aria-label="Two waveforms: the ALDL line idles high with short and long low pulses; the RX pin shows the same pulses inverted, idling low.">
+        <text class="lbl-a" x="16" y="24">ALDL PIN E</text>
+        <text class="lbl-m" x="130" y="24">idles high · pulses low</text>
+        <line class="gridline" x1="16" y1="36" x2="704" y2="36"/>
+        <line class="gridline" x1="16" y1="76" x2="704" y2="76"/>
+        <!-- in: high, short low (0), high, long low (1), high -->
+        <path class="wave-in" d="M16,36 L120,36 L120,76 L150,76 L150,36 L300,36 L300,76 L420,76 L420,36 L560,36 L560,76 L590,76 L590,36 L704,36"/>
+        <text class="lbl-m" x="112" y="96">short = 0</text>
+        <text class="lbl-m" x="330" y="96">long = 1</text>
+
+        <text class="lbl-c" x="16" y="130">ESP32 RX</text>
+        <text class="lbl-m" x="110" y="130">same pulses, flipped — what the PL2303 cable also does</text>
+        <line class="gridline" x1="16" y1="142" x2="704" y2="142"/>
+        <line class="gridline" x1="16" y1="182" x2="704" y2="182"/>
+        <path class="wave-out" d="M16,182 L120,182 L120,142 L150,142 L150,182 L300,182 L300,142 L420,142 L420,182 L560,182 L560,142 L590,142 L590,182 L704,182"/>
+      </svg>
+    </div>
+    <figcaption>Line high → Q1 on → RX pulled low. Line pulsed low → Q1 off → R2 pulls RX
+    to 3.3V. Q1 switches at ~0.7V on the base, well inside the line's swing. If a build
+    ever comes out non-inverted, it's a flag, not a fault: <code>goaldl -tcp &lt;addr&gt; -invert</code>.</figcaption>
+  </figure>
+
+  <h2>Where the two wires come from <span class="tag">12-pin ALDL connector</span></h2>
+  <figure>
+    <div class="panel narrow">
+      <svg viewBox="0 0 560 170" role="img" aria-label="12-pin ALDL connector face: top row pins F E D C B A, bottom row G H J K L M. Pin A is ground, pin E is the 160-baud data line.">
+        <rect class="comp" x="20" y="30" width="520" height="110" rx="10"/>
+        <!-- top row F E D C B A -->
+        <rect class="pincell"     x="45"  y="45" width="70" height="38" rx="4"/>
+        <rect class="pincell-hot" x="125" y="45" width="70" height="38" rx="4"/>
+        <rect class="pincell"     x="205" y="45" width="70" height="38" rx="4"/>
+        <rect class="pincell"     x="285" y="45" width="70" height="38" rx="4"/>
+        <rect class="pincell"     x="365" y="45" width="70" height="38" rx="4"/>
+        <rect class="pincell-gnd" x="445" y="45" width="70" height="38" rx="4"/>
+        <text class="lbl" x="73"  y="69">F</text>
+        <text class="lbl-c" x="152" y="69">E</text>
+        <text class="lbl" x="233" y="69">D</text>
+        <text class="lbl" x="313" y="69">C</text>
+        <text class="lbl" x="393" y="69">B</text>
+        <text class="lbl" x="473" y="69">A</text>
+        <!-- bottom row G H J K L M -->
+        <rect class="pincell" x="45"  y="92" width="70" height="38" rx="4"/>
+        <rect class="pincell" x="125" y="92" width="70" height="38" rx="4"/>
+        <rect class="pincell" x="205" y="92" width="70" height="38" rx="4"/>
+        <rect class="pincell" x="285" y="92" width="70" height="38" rx="4"/>
+        <rect class="pincell" x="365" y="92" width="70" height="38" rx="4"/>
+        <rect class="pincell" x="445" y="92" width="70" height="38" rx="4"/>
+        <text class="lbl" x="72"  y="116">G</text>
+        <text class="lbl" x="152" y="116">H</text>
+        <text class="lbl" x="233" y="116">J</text>
+        <text class="lbl" x="313" y="116">K</text>
+        <text class="lbl" x="392" y="116">L</text>
+        <text class="lbl" x="471" y="116">M</text>
+        <text class="lbl-c" x="125" y="160">E = 160-baud data</text>
+        <text class="lbl-g" x="380" y="160">A = ground</text>
+      </svg>
+    </div>
+    <figcaption>Viewed looking into the car's connector under the dash (no pin I on
+    GM connectors). Your PL2303 cable already plugs into E and A — the bridge taps the
+    same two pins.</figcaption>
+  </figure>
+  <p class="callout"><strong>Measure before wiring.</strong> Key on, engine off: pin E to
+  pin A should read a few volts and be busy (the ECM streams continuously). If it reads
+  0V or battery voltage steadily, re-check which pin you're on before connecting anything.</p>
+
+  <h2>Bench variant <span class="tag">no car, no conditioning</span></h2>
+  <figure>
+    <div class="panel narrow">
+      <svg viewBox="0 0 720 150" role="img" aria-label="Bench wiring: USB-TTL adapter TX to ESP32 RX, ground to ground. Mac replays the drive capture out the adapter.">
+        <rect class="boxfill" x="20" y="35" width="150" height="90" rx="4"/>
+        <text class="lbl" x="36" y="64">USB-TTL</text>
+        <text class="lbl-m" x="36" y="82">(FTDI, 3.3V)</text>
+        <text class="lbl-c" x="140" y="70">TX</text>
+        <text class="lbl-g" x="132" y="112">GND</text>
+        <rect class="boxfill" x="550" y="35" width="150" height="90" rx="4"/>
+        <text class="lbl" x="566" y="64">QT Py</text>
+        <text class="lbl" x="566" y="82">ESP32-S3</text>
+        <text class="lbl-c" x="556" y="70">RX</text>
+        <text class="lbl-g" x="556" y="112">GND</text>
+        <line class="sig"  x1="170" y1="65"  x2="550" y2="65"/>
+        <line class="gndw" x1="170" y1="107" x2="550" y2="107"/>
+        <text class="lbl-m" x="240" y="55">Mac replays drive_4800.raw at 4800 baud</text>
+        <text class="lbl-g" x="310" y="128">common ground</text>
+      </svg>
+    </div>
+    <figcaption>A 3.3V USB-TTL adapter's TX is already clean logic — wire it straight to
+    RX. This exercises the real <code>busio.UART</code> path (<code>BRIDGE_TEST = "0"</code>)
+    and should reproduce the 635/635 drive-capture frames over WiFi before the car is
+    involved. If the adapter is 5V-only, put the Q1 stage above inline.</figcaption>
+  </figure>
+
+  <h2>Parts <span class="tag">junk-drawer tier</span></h2>
+  <table>
+    <thead>
+      <tr><th>Part</th><th>Value</th><th>Job</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="part">Q1</td><td>2N3904 (or 2N2222, BC547 — any small NPN)</td><td>Clamps the car domain off the RX pin and inverts, switching at ~0.7V</td></tr>
+      <tr><td class="part">R1</td><td>10kΩ</td><td>Limits base current — makes 12V+ transients on the line a non-event</td></tr>
+      <tr><td class="part">R2</td><td>10kΩ</td><td>Pulls RX to 3.3V when Q1 is off (take 3.3V from the QT Py's 3V pin)</td></tr>
+      <tr><td class="part">R3</td><td>100kΩ, optional</td><td>Keeps Q1 off against noise if the line floats</td></tr>
+      <tr><td class="part">—</td><td>Hookup wire, heat-shrink</td><td>Strain relief matters more than the electronics here</td></tr>
+    </tbody>
+  </table>
+
+  <ul class="notes">
+    <li>Power in the car: 12V accessory → any USB adapter → the QT Py's USB-C. USB carries
+    power only in the deployed setup; data leaves over WiFi.</li>
+    <li>Optocoupler alternative (PC817 + ~1kΩ LED resistor) buys full galvanic isolation
+    for a couple more parts — same inverting behavior, same three board pins.</li>
+    <li>The bridge firmware needs no change for any of this: it reads RX at 4800 baud and
+    forwards bytes verbatim, warts and all.</li>
+  </ul>
+
+  <h2>One connector, both ALDL generations <span class="tag">superset design</span></h2>
+  <p class="lede" style="margin-bottom: 1rem;">The 8192-baud ECMs (mid-'86+) use the same
+  12-pin shell but move data to pin M as a half-duplex request/response UART. One built
+  cable can serve both: wire pin E <em>and</em> pin M, each through its own stage, to two
+  of the S3's three UARTs — firmware selects which is live.</p>
+  <table>
+    <thead>
+      <tr><th></th><th>160-baud · pin E (this build)</th><th>8192-baud · pin M (door open)</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="part">Signal</td><td>one-way PWM broadcast</td><td>half-duplex UART, request/response</td></tr>
+      <tr><td class="part">Input stage</td><td>inverting NPN clamp (above)</td><td>non-inverting clamp, or invert RX in the S3's UART hardware</td></tr>
+      <tr><td class="part">TX path</td><td>none — receive-only</td><td>one open-collector NPN driving the line</td></tr>
+      <tr><td class="part">Hardware delta</td><td>—</td><td>~two more transistors + resistors on the same connector</td></tr>
+      <tr><td class="part">Software</td><td>shipped (goaldl decoder + TCPProvider)</td><td>a real future feature: second decode path, mode-request protocol, per-ECM tables</td></tr>
+    </tbody>
+  </table>
+  <p class="callout"><strong>Build the universal connector; ship the 160-baud feature.</strong>
+  Wiring pin M costs a few parts now and makes the cable future-proof; the 8192 software
+  is a separate project (tracked as Horizon 3 interop in the roadmap).</p>
+</main>
