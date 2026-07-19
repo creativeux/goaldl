@@ -31,6 +31,12 @@ runs fine without it, just dark.)
   matching (`prom_ok=true`), correct idle sensor values, and ~1.17 s frame cadence
   (real ECM: ~1.18 s). Desktop side: `stream.TCPProvider`, PR #41-follow-on
   (`specs/2026-07-06_feature_tcp-provider/`).
+- **2026-07-19 — review-hardening pass** (agent PR review findings): client sends are
+  bounded (`settimeout(2)`) so a wedged-but-open peer degrades to a normal client-drop
+  instead of stalling the loop for the OS's TCP retransmission timeout; station-mode
+  join retries in a loop (red/yellow blink + console message on failure) instead of
+  halting on a wrong password or out-of-range network; `TestSource.read(n)` honors the
+  caller's byte cap. Code-reviewed; on-board smoke re-run pending next replug.
 - **Pending — real-UART bench leg**: `BRIDGE_TEST=0`, a 3.3V USB-TTL adapter replays
   `pkg/decoder/testdata/drive_4800.raw` at 4800 baud into the RX pin (TX→RX, GND→GND);
   expect 635/635 frames over WiFi.

@@ -89,17 +89,20 @@ class TestSource:
         self._pos = 0
         self._last = time.monotonic()
 
-    def read(self, _n):
+    def read(self, n):
         now = time.monotonic()
-        n = int((now - self._last) * 160)
-        if n <= 0:
+        due = int((now - self._last) * 160)
+        if due <= 0:
             return None
+        # Honor the caller's cap (like a real UART read); the remainder stays
+        # due and comes out on the next call.
+        due = min(due, n)
         # Advance by the bytes actually emitted (not to `now`) so truncated
         # fractions carry over — otherwise the effective rate sags well below
         # 160 B/s and the frame cadence reads slow in goaldl.
-        self._last += n / 160.0
+        self._last += due / 160.0
         chunk = bytearray()
-        for _ in range(n):
+        for _ in range(due):
             chunk.append(self._stream[self._pos])
             self._pos = (self._pos + 1) % len(self._stream)
         return bytes(chunk)
@@ -119,8 +122,19 @@ else:
 # --- WiFi --------------------------------------------------------------------
 status(YELLOW)
 if MODE == "sta":
-    print("bridge: joining", SSID, "...")
-    wifi.radio.connect(SSID, PASSWORD)
+    # Keep retrying: the network may simply not be up yet (car parked out of
+    # range, hotspot not started). A wrong password also lands here — the
+    # red/yellow blink plus the console message is the diagnostic.
+    while not wifi.radio.connected:
+        print("bridge: joining", SSID, "...")
+        try:
+            wifi.radio.connect(SSID, PASSWORD, timeout=10)
+        except (ConnectionError, OSError) as e:
+            print("bridge: join failed:", e, "- retrying in 3s")
+            status(RED)
+            time.sleep(0.4)
+            status(YELLOW)
+            time.sleep(2.6)
     ip = wifi.radio.ipv4_address
 else:
     print("bridge: starting AP", SSID)
@@ -149,7 +163,12 @@ while True:
         status(BLUE)
         try:
             client, addr = server.accept()
-            client.setblocking(True)
+            # Bounded sends: a peer that stops reading without closing (frozen
+            # app, one-way WiFi stall) must degrade to "client dropped" in
+            # seconds, not block the loop for the OS's full TCP retransmission
+            # timeout — while blocked we can't accept a new client or drain
+            # the UART. 2s is ~250 frame-bytes of grace at the 160 B/s rate.
+            client.settimeout(2)
             sent = 0
             print("bridge: client", addr)
             status(GREEN)
