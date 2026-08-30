@@ -16,8 +16,12 @@
 #                     UART — validates the WiFi/TCP path with no wiring at all.
 #
 # Wiring (real mode): ALDL-side TTL serial TX -> board RX pin, GND -> GND.
-# 3.3V logic only. The UART idles high; the interface cable's inversion means
-# bytes arrive as 0xFE (short pulse / logic 0) and 0x00 (long pulse / logic 1).
+# 3.3V logic only. RX must idle HIGH and follow the ALDL line -- the input stage
+# applies NO NET INVERSION (see README "Input conditioning": two NPN stages, the
+# second undoing the first). Each low pulse is then a UART start bit, so bytes
+# arrive as 0xFE (short pulse / logic 0) and 0x00 (long pulse / logic 1).
+# Get that backwards and RX sits low between pulses: the UART reads a continuous
+# break, the capture is ~100% 0x00 with no 0xFE, and nothing ever syncs.
 #
 # Status LED (NeoPixel): yellow = starting · blue = up, waiting for a client ·
 # green = client connected · red blink = client dropped.

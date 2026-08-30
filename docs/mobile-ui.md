@@ -213,8 +213,10 @@ filthy (alternator noise, load dumps, inductive spikes).
 
 - **Minimum viable:** resistor divider (e.g. 10k over 20k), 5V → 3.3V into UART RX. Polarity is
   already UART-shaped at logic level (idles high, pulses low = start bit) — no inversion needed.
-- **More robust:** NPN transistor buffer or optocoupler (protection/isolation; both invert — set
-  `UART_RXD_INV`). An opto gives galvanic isolation: the gold standard here.
+- **More robust:** NPN transistor buffer or optocoupler (protection/isolation; both invert — so
+  either set `UART_RXD_INV`, or invert back in hardware with a second stage. CircuitPython's
+  `busio.UART` does **not** expose the invert flag, which is why `firmware/bridge` uses two NPN
+  stages). An opto gives galvanic isolation: the gold standard here.
 - Small series resistor + clamp diode on the input is cheap insurance either way.
 
 ### Power — NOT from the ALDL connector

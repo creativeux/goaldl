@@ -3,8 +3,9 @@
 ## The ALDL 160-baud stream
 
 The ALDL line idles high and encodes each bit as the *width* of a low pulse
-(short ≈ logic 0, long ≈ logic 1). An inverting interface cable feeds this to a
-PC UART, which frames exactly **one byte per ALDL bit** — so decoding is a
+(short ≈ logic 0, long ≈ logic 1). A level-shifting interface cable feeds this
+to a PC UART with **no net inversion** — the line is already UART-shaped, so RX
+idles high and each low pulse is a start bit — which frames exactly **one byte per ALDL bit** — so decoding is a
 matter of reading byte *values*, not host-side timing (which USB makes
 unreliable). At 4800 baud a short pulse arrives as `0xFE` and a long pulse as
 `0x00`; nine consecutive 1-bits are the `0x1FF` sync that delimits 20-byte

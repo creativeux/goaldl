@@ -4,15 +4,23 @@
 // Physical model: the ALDL line idles HIGH. Each 6250μs bit cell starts with
 // a falling edge followed by a LOW pulse whose duration encodes the bit
 // (short ≈365μs = logic 0, long ≈1875μs on the GM 1227747 = logic 1; widths
-// vary by ECM family). The interface cable inverts the signal onto the PC
-// UART's RX line, so the UART frames one character per ALDL bit: the falling
-// edge is its start bit, and the number of consecutive LOW data bits (LSB
+// vary by ECM family). The interface path applies NO NET INVERSION: RX at the
+// UART pin idles high and follows the line, so the UART frames one character
+// per ALDL bit: the falling edge is its start bit, and the number of consecutive LOW data bits (LSB
 // first) measures the pulse width with the UART's own hardware clock.
 //
 // At 4800 baud (208μs/bit): logic 0 → 0xFE, logic 1 (1875μs = start + 8 data
 // bits) → 0x00. At 2400 baud: logic 0 → 0xFF, logic 1 → ~0xF0/0xF8. Idle
 // time between pulses produces no bytes at all, so the byte stream is NOT a
 // uniform-rate waveform sample — each byte is one bit event.
+//
+// A stage that inverts must be paired with a receiver that inverts back: an
+// RS-232 line receiver does (which is why classic ALDL cables contain a single
+// inverting transistor), a TTL UART pin does not. Get that wrong and RX sits
+// low between pulses, which the UART reads as a continuous break — the capture
+// is ~100% 0x00, contains no 0xFE at all, and never syncs. A healthy 4800-baud
+// capture is ~70% 0xFE / ~30% 0x00 (see testdata/idle_4800.raw). Check the byte
+// mix first: it identifies this in one command.
 //
 // Character framing (per Tech Edge aldl160 spec): 9-bit characters = 1 mode
 // bit + 8 data bits MSB first. Data characters have mode bit 0. The sync
@@ -38,7 +46,7 @@ type Config struct {
 	BaudRate  int  // UART sampling rate the capture was recorded at (e.g. 4800)
 	FrameSize int  // data bytes per frame (20 for GM 1227747)
 	SyncBits  int  // consecutive 1-bits that constitute sync (9)
-	Invert    bool // invert byte values first (non-inverting cable)
+	Invert    bool // complement byte values before classifying (see -invert)
 }
 
 // DefaultConfig returns the configuration for the GM 1227747 recorded at 4800 baud.

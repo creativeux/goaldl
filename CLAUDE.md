@@ -69,11 +69,13 @@ The ALDL line idles HIGH. Each 6250μs bit cell (160 bps) starts with a falling 
 
 ### How a PC UART reads this signal (the key insight)
 
-The interface cable inverts the signal onto the UART RX pin. Each ALDL pulse triggers exactly one UART character: the falling edge is the start bit, and the number of consecutive LOW data bits (LSB first) measures the pulse width **using the adapter chip's own hardware clock**. At 4800 baud (208μs/UART bit):
+The interface path applies **no net inversion** — RX at the UART pin idles high and follows the line. Each ALDL pulse therefore triggers exactly one UART character: the pulse's falling edge is the start bit, and the number of consecutive LOW data bits (LSB first) measures the pulse width **using the adapter chip's own hardware clock**. At 4800 baud (208μs/UART bit):
 
 - Logic 0 (~365μs) → byte `0xFE`
 - Logic 1 (~1875μs) → byte `0x00`
 - **One byte per ALDL bit. Idle time between pulses produces no bytes at all.**
+
+**Polarity is not negotiable, and it is the first thing to check on any new cable or bridge build.** A UART start bit is a falling edge from an idle-high line, so RX must follow pin E. A stage that inverts has to be paired with a receiver that inverts back — an RS-232 line receiver does (hence the single inverting transistor in classic ALDL cables), a TTL UART pin does not. An *inverting* input stage holds RX low between pulses, which the UART reads as a continuous break: the capture comes out ~100% `0x00` with no `0xFE` at all and never syncs. Diagnose by byte mix, not by staring at the circuit — a good 4800-baud capture is ~70% `0xFE` / ~30% `0x00` (`pkg/decoder/testdata/idle_4800.raw` is 69.4/30.5). Verified on hardware 2026-08-30, after an inverting bridge stage produced exactly that 99.7%-`0x00` signature.
 
 Consequences that MUST guide any decoder work:
 

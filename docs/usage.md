@@ -81,8 +81,10 @@ You need:
 
 - **A compatible GM vehicle** with an ALDL port — usually a 12-pin connector
   under the dash.
-- **A USB-to-ALDL cable** — an inverting level converter onto the UART RX line.
-  A Prolific **PL2303** or a genuine FTDI **FT232R** both work.
+- **A USB-to-ALDL cable** — a level converter onto the UART RX line, clamping the
+  car's voltage domain with **no net inversion** (the ALDL line is already UART-shaped:
+  idles high, pulses low, so RX must too). A Prolific **PL2303** or a genuine FTDI
+  **FT232R** both work.
 
 For the driver each OS needs (and the supported-platform matrix), see
 [Platform support](../README.md#platform-support).
