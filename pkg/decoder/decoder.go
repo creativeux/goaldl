@@ -4,8 +4,9 @@
 // Physical model: the ALDL line idles HIGH. Each 6250μs bit cell starts with
 // a falling edge followed by a LOW pulse whose duration encodes the bit
 // (short ≈365μs = logic 0, long ≈1875μs on the GM 1227747 = logic 1; widths
-// vary by ECM family). The interface cable inverts the signal onto the PC
-// UART's RX line, so the UART frames one character per ALDL bit: the falling
+// vary by ECM family). The interface cable clamps and level-shifts the line
+// onto the PC UART's RX pin WITHOUT inverting it — RX idles high exactly as
+// the line does — so the UART frames one character per ALDL bit: the falling
 // edge is its start bit, and the number of consecutive LOW data bits (LSB
 // first) measures the pulse width with the UART's own hardware clock.
 //
@@ -13,6 +14,11 @@
 // bits) → 0x00. At 2400 baud: logic 0 → 0xFF, logic 1 → ~0xF0/0xF8. Idle
 // time between pulses produces no bytes at all, so the byte stream is NOT a
 // uniform-rate waveform sample — each byte is one bit event.
+//
+// Polarity check: an inverting input stage holds RX low between pulses, which
+// the UART reads as a continuous break — the capture is ~100% 0x00, contains
+// no 0xFE at all, and never syncs. A healthy 4800-baud capture is ~70% 0xFE /
+// ~30% 0x00 (see testdata/idle_4800.raw). Check the byte mix first.
 //
 // Character framing (per Tech Edge aldl160 spec): 9-bit characters = 1 mode
 // bit + 8 data bits MSB first. Data characters have mode bit 0. The sync

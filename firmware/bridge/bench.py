@@ -5,13 +5,19 @@
 #
 #   1. Static verification of the input-conditioning stage (README "Input
 #      conditioning") with no signal source at all. Jumper the stage's input
-#      (ALDL pin E side of R1) to 3V and to GND in turn; RX must read the
-#      OPPOSITE each time -- the stage inverts. Same level both ways, or
-#      inverted from the table below, means Q1 is in backwards.
+#      (ALDL pin E side of R1) to 3V and to GND in turn. The two-stage build
+#      does NOT invert -- RX follows the input:
 #
-#         stage input -> 3V   =>  RX LOW
-#         stage input -> GND  =>  RX HIGH
-#         stage input floating =>  RX HIGH (with R3 fitted)
+#         stage input -> 3V    =>  RX HIGH
+#         stage input -> GND   =>  RX LOW
+#         stage input floating =>  RX LOW (with R3 fitted)
+#
+#      Same level both ways means a stage isn't switching (check the 2N3904
+#      markings -- a 2N3906 is a PNP in the same package -- the emitter
+#      grounds, and the base resistors). The OPPOSITE table means only one
+#      stage is in circuit: most likely RX is still wired to Q1's collector
+#      instead of Q2's. A one-stage build cannot sync; see the README's byte-
+#      mix table.
 #
 #   2. First diagnostic in the car: if goaldl decodes nothing, this answers
 #      "is the RX pin even toggling?" before anyone suspects the decoder.

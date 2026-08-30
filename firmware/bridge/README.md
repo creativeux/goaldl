@@ -54,46 +54,106 @@ default in the car), where the bridge *is* the network.
   with it Q1's orientation, the emitter ground, and the R1/R2/R3 placements. **Not**
   covered: switching speed (static levels only — though a 2N3904 switches in well under
   1 µs against a 6250 µs bit cell) and the 12V clamp itself (nothing exceeded 3.3V).
+  *Superseded 2026-08-30: this measured exactly what the spec asked for, and the spec
+  was wrong — a single inverting stage. The circuit was faithfully built and faithfully
+  tested against a backwards requirement, which is why the static check passed and the
+  car did not. See the entry below.*
+- **2026-08-30 — polarity fault found and fixed; CAR LEG PROVEN.** First car attempt
+  (breadboard, pins E/A, engine running) reached the dashboard's `waiting for frame
+  sync` state — bytes arriving, no sync. A 60 s raw capture via
+  `monitor -tcp 192.168.4.1:3333 -o` settled it in one histogram: **99.7% `0x00`, zero
+  `0xFE`**, with `0x00` runs up to 1587 — a UART held in continuous break, i.e. RX
+  idling low. `-invert` failed too (as it must: framing artifacts, not inverted data),
+  as did 2400 baud. Root cause: the single NPN stage inverts, but the ALDL line is
+  already UART-shaped and RX must follow pin E directly. Fix: a **second identical NPN
+  stage** in series (Q2/R4/R5, RX moved to Q2's collector). Re-verified statically
+  (`3V → HIGH`, `GND → LOW`, `floating → LOW`) then in the Jeep: **70.7% `0xFE` /
+  29.2% `0x00`, 99.85% clean, 32/32 frames, PROM ✓**, warm idle at RPM 825 / coolant
+  176 °F / batt 13.5 V / BLM 125 / INT 128. The bridge is proven end to end on a
+  running engine.
 - **Pending — real-UART bench leg**: `BRIDGE_TEST=0`, a 3.3V USB-TTL adapter replays
   `pkg/decoder/testdata/drive_4800.raw` at 4800 baud into the RX pin (TX→RX, GND→GND);
-  expect 635/635 frames over WiFi.
-- **Pending — conditioning stage under real traffic**: the same USB-TTL replay, but
-  routed *through* the Q1 stage into the ALDL-pin-E input rather than straight to RX
-  (add `-invert` on the goaldl side). Closes the switching-speed question the static
-  test leaves open.
-- **Pending — car leg**: the stage on ALDL pins E/A, off a 12-pin pigtail, on perfboard
-  rather than a breadboard.
+  expect 635/635 frames over WiFi. Now a regression fixture rather than a gate — the car
+  leg has already proven the path.
+- **Pending — perfboard build**: the breadboard is proven but is not a vehicle install.
+  Transfer to soldered perfboard with strain relief before any datalogging drive.
 
 ## Input conditioning (car wiring)
 
 The QT Py's pins are 3.3V-max; the ALDL line lives in the car's 12V domain (the data
-line itself typically idles ~5V, but design for the dirty case). One NPN stage clamps
-and inverts — the same two jobs the PL2303 cable's internal circuit does, so the bytes
-match a serial capture byte-for-byte:
+line itself typically idles ~5V, but design for the dirty case). The input stage must
+clamp that domain away from the pin **while preserving polarity** — see the polarity
+note below, it is the part that is easy to get wrong. Two NPN stages in series: the
+first clamps and inverts, the second inverts back.
 
 ```
-ALDL pin E ── R1 10kΩ ──┬── base  Q1 2N3904
-                        │
+ALDL pin E ── R1 10kΩ ──┬── base  Q1 2N3904        ── R4 10kΩ ──┬── base  Q2 2N3904
+                        │                                       │
              (optional R3 100kΩ base→GND)
 
-QT Py 3V ─── R2 10kΩ ───┬── QT Py RX
-                     collector
-                      emitter
-                        │
-ALDL pin A ─────────────┴── QT Py GND   (shared ground)
+QT Py 3V ─── R2 10kΩ ───┬── Q1 collector           QT Py 3V ─── R5 10kΩ ───┬── QT Py RX
+                        │   (drives R4)                                 collector
+                     emitter                                             emitter
+                        │                                                   │
+ALDL pin A ─────────────┴───────────────────────────────────────────────────┴── QT Py GND
 ```
 
-- Line high → Q1 on → RX low; line pulsed low → Q1 off → R2 pulls RX to 3.3V. Switches
-  at ~0.7V. R1 makes 12V+ transients on the line a non-event.
-- Polarity is insurance-covered either way: `goaldl -tcp <addr> -invert` flips the
-  decoder if a build comes out non-inverted.
-- Optocoupler alternative (PC817 + ~1kΩ) buys galvanic isolation, same behavior.
+- **Stage 1**: line high → Q1 on → its collector low. Line pulsed low → Q1 off → R2
+  pulls the collector to 3.3V. Switches at ~0.7V; R1 makes 12V+ transients a non-event.
+- **Stage 2**: repeats the inversion, so RX ends up following pin E directly — idle
+  high, pulsing low, which is what a UART needs.
+- **RX comes off Q2's collector only.** Nothing connects Q1's collector to RX; that is
+  the single most common slip when rebuilding from the one-stage version.
+
+### Polarity: why two stages and not one
+
+A UART start bit is a falling edge from an idle-high line. The ALDL line is already
+UART-shaped (idles high, pulses low), so **RX must follow pin E directly** — a short
+low pulse becomes `0xFE`, a long one `0x00`. A single inverting stage holds RX *low*
+between pulses, which the UART reads as a continuous break.
+
+That failure is unmistakable in the data, and `goaldl -invert` does **not** rescue it —
+the bytes are framing artifacts, not inverted data, so there is nothing to flip:
+
+| Capture | `0xFE` | `0x00` |
+|---|---|---|
+| Healthy (`pkg/decoder/testdata/idle_4800.raw`) | 69.4% | 30.5% |
+| Healthy (this bridge, 2026-08-30) | 70.7% | 29.2% |
+| **One inverting stage — broken** | **0%** | **99.7%** |
+
+**Check the byte mix before anything else** when a build won't sync. `monitor -o` a
+minute of raw bytes and histogram it; the answer is immediate and needs no hardware.
+
+An earlier revision of this file specified a single inverting stage, on the mistaken
+premise that the PL2303 cable inverts. It does not — it clamps and level-shifts with
+the polarity preserved. `docs/mobile-ui.md` had this right all along ("Polarity is
+already UART-shaped at logic level ... no inversion needed").
+
+- Optocoupler alternative (PC817 + ~1kΩ) buys galvanic isolation — but an opto inverts,
+  so it replaces stage 1 and still needs stage 2 (or an ESP32 with `UART_RXD_INV`
+  exposed; CircuitPython's `busio.UART` does not expose it, which is why this build
+  re-inverts in hardware).
 - **Measure first**: key on, engine off — pin E to pin A should read a few volts and be
   busy. 12-pin connector, top row F E D C B A / bottom G H J K L M (no pin I); the
   PL2303 cable taps the same E + A.
 - Power in the car: 12V accessory → USB adapter → USB-C. USB is power-only when
   deployed; data leaves over WiFi. (On the bench, USB also carries the CircuitPython
   console and the `CIRCUITPY` drive.)
+
+### Static bench check (no adapter, no car)
+
+With `bench.py` running, jumper the stage input (the pin-E side of R1) and watch RX.
+The two-stage build does **not** invert, so:
+
+| Stage input | RX |
+|---|---|
+| 3V | HIGH |
+| GND | LOW |
+| floating (R3 fitted) | LOW |
+
+A one-stage build gives the opposite table — which is how a wrong build passes a static
+test that was written against the wrong spec. Confirm against this table, then confirm
+against the byte mix in the car.
 
 ## One connector for all ECM generations (design decision, 2026-07-18)
 
@@ -106,7 +166,7 @@ the generations differ in signal, not connector:
 | Connector | same 12-pin shell | same 12-pin shell |
 | Data pin | E | M |
 | Signal | one-way PWM broadcast | half-duplex UART, request/response |
-| Input stage | inverting NPN clamp (above) | non-inverting clamp (or ESP32 RX-invert in hardware) |
+| Input stage | two-NPN non-inverting clamp (above) | same clamp, one stage (an 8192 line is inverted relative to E) |
 | TX path | none needed | one open-collector NPN driving the line |
 | ESP32 side | UART0 RX @ 4800 (the UART-sampling trick) | second UART @ 8192 (S3 has 3) |
 
@@ -126,4 +186,5 @@ definitions would arrive). Build the universal connector; ship the 160-baud feat
 signal waveforms, connector pinout, bench variant, generation-comparison table, and the
 parts list. Self-contained HTML (no external assets, light/dark aware): open it in any
 browser. The ASCII schematic above is the quick in-terminal version of the same circuit.
-Parts: Q1 2N3904 (any small NPN), R1/R2 10kΩ, R3 100kΩ optional.
+Parts: Q1 + Q2 2N3904 (any small NPN — check the marking, a 2N3906 is a PNP in an
+identical package), R1/R2/R4/R5 10kΩ, R3 100kΩ optional.

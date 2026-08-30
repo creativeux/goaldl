@@ -190,7 +190,7 @@
   <header>
     <p class="eyebrow">goaldl · bridge hardware · stage 2</p>
     <h1>ALDL → ESP32 input conditioning</h1>
-    <p class="lede">One transistor stands between the car's 12V-domain data line and the
+    <p class="lede">Two transistors stand between the car's 12V-domain data line and the
     QT Py's 3.3V-only RX pin. It clamps the voltage <em>and</em> inverts the signal — the
     same two jobs the PL2303 cable's internal circuit does today, so the bytes come out
     identical to a serial capture.</p>
@@ -199,96 +199,124 @@
   <h2>The circuit <span class="tag">2 wires from the car, 3 pins on the board</span></h2>
   <figure>
     <div class="panel">
-      <svg viewBox="0 0 940 400" role="img" aria-label="Schematic: ALDL pin E through a 10 kilohm resistor to the base of a 2N3904 NPN transistor; emitter to shared ground; collector pulled up to 3.3 volts through 10 kilohms and wired to the ESP32 RX pin; optional 100 kilohm base pulldown.">
-        <!-- domain zones -->
-        <rect class="zone-12" x="10" y="10" width="490" height="380" rx="4"/>
-        <rect class="zone-33" x="500" y="10" width="420" height="380" rx="4"/>
-        <line class="split" x1="500" y1="10" x2="500" y2="390"/>
+      <svg viewBox="0 0 1240 400" role="img" aria-label="Schematic: ALDL pin E through a 10 kilohm resistor to the base of NPN transistor Q1; Q1 collector pulled up to 3.3 volts through 10 kilohms and feeding a second 10 kilohm resistor into the base of NPN transistor Q2; Q2 collector pulled up to 3.3 volts through 10 kilohms and wired to the ESP32 RX pin; both emitters to shared ground; optional 100 kilohm base pulldown on Q1.">
+        <!-- voltage-domain zones -->
+        <rect class="zone-12" x="10" y="10" width="400" height="380" rx="4"/>
+        <rect class="zone-33" x="410" y="10" width="820" height="380" rx="4"/>
+        <line class="split" x1="410" y1="10" x2="410" y2="390"/>
         <text class="lbl-a" x="26" y="34">CAR · 12V DOMAIN</text>
-        <text class="lbl-b" x="770" y="34">BRIDGE · 3.3V ONLY</text>
+        <text class="lbl-b" x="1000" y="34">BRIDGE · 3.3V ONLY</text>
 
-        <!-- ALDL connector box -->
-        <rect class="boxfill" x="34" y="110" width="88" height="250" rx="4"/>
-        <text class="lbl" x="48" y="140">ALDL</text>
-        <text class="lbl-m" x="48" y="158">under</text>
-        <text class="lbl-m" x="48" y="174">dash</text>
-        <text class="lbl-c" x="96" y="216">E</text>
-        <text class="lbl-g" x="96" y="336">A</text>
+        <!-- ALDL connector -->
+        <rect class="boxfill" x="34" y="120" width="88" height="240" rx="4"/>
+        <text class="lbl" x="48" y="150">ALDL</text>
+        <text class="lbl-m" x="48" y="168">under</text>
+        <text class="lbl-m" x="48" y="184">dash</text>
+        <text class="lbl-c" x="96" y="226">E</text>
+        <text class="lbl-g" x="96" y="348">A</text>
 
-        <!-- ESP32 box -->
-        <rect class="boxfill" x="812" y="40" width="112" height="320" rx="4"/>
-        <text class="lbl" x="830" y="70">QT Py</text>
-        <text class="lbl" x="830" y="88">ESP32-S3</text>
-        <text class="lbl-r" x="822" y="126">3V</text>
-        <text class="lbl-c" x="822" y="186">RX</text>
-        <text class="lbl-g" x="822" y="336">GND</text>
+        <!-- QT Py -->
+        <rect class="boxfill" x="1050" y="50" width="112" height="310" rx="4"/>
+        <text class="lbl" x="1068" y="80">QT Py</text>
+        <text class="lbl" x="1068" y="98">ESP32-S3</text>
+        <text class="lbl-r" x="1060" y="136">3V</text>
+        <text class="lbl-c" x="1060" y="196">RX</text>
+        <text class="lbl-g" x="1060" y="348">GND</text>
 
-        <!-- signal: pin E -> R1 -> base node -->
-        <line class="sig" x1="122" y1="210" x2="196" y2="210"/>
-        <!-- R1 zigzag -->
-        <path class="sig" d="M196,210 l8,0 l6,-11 l12,22 l12,-22 l12,22 l12,-22 l6,11 l8,0"/>
-        <text class="lbl" x="204" y="188">R1 10kΩ</text>
-        <line class="sig" x1="272" y1="210" x2="360" y2="210"/>
-        <circle class="dot" cx="360" cy="210" r="4"/>
-        <line class="sig" x1="360" y1="210" x2="547" y2="210"/>
+        <!-- pin E -> R1 -> Q1 base -->
+        <line class="sig" x1="122" y1="220" x2="176" y2="220"/>
+        <path class="sig" d="M176,220 l8,0 l6,-11 l12,22 l12,-22 l12,22 l12,-22 l6,11 l8,0"/>
+        <text class="lbl" x="184" y="198">R1 10kΩ</text>
+        <line class="sig" x1="252" y1="220" x2="330" y2="220"/>
+        <circle class="dot" cx="330" cy="220" r="4"/>
+        <line class="sig" x1="330" y1="220" x2="520" y2="220"/>
 
-        <!-- R3 optional pulldown from base node -->
-        <line class="wire" x1="360" y1="210" x2="360" y2="248"/>
-        <path class="wire" d="M360,248 l0,6 l-11,6 l22,12 l-22,12 l22,12 l-22,12 l11,6 l0,6"/>
-        <line class="wire" x1="360" y1="320" x2="360" y2="332"/>
-        <circle class="dot" cx="360" cy="332" r="4"/>
-        <text class="lbl-m" x="378" y="278">R3 100kΩ</text>
-        <text class="lbl-m" x="378" y="294">(optional)</text>
+        <!-- optional R3 base pulldown -->
+        <line class="wire" x1="330" y1="220" x2="330" y2="258"/>
+        <path class="wire" d="M330,258 l0,6 l-11,6 l22,12 l-22,12 l22,12 l-22,12 l11,6 l0,6"/>
+        <line class="wire" x1="330" y1="330" x2="330" y2="342"/>
+        <circle class="dot" cx="330" cy="342" r="4"/>
+        <text class="lbl-m" x="348" y="288">R3 100kΩ</text>
+        <text class="lbl-m" x="348" y="304">(optional)</text>
 
-        <!-- transistor Q1 -->
-        <circle class="comp" cx="585" cy="210" r="40"/>
-        <line class="comp" x1="565" y1="184" x2="565" y2="236" stroke-width="3"/>
-        <!-- collector: up-right -->
-        <line class="comp" x1="565" y1="196" x2="596" y2="176"/>
-        <line class="comp" x1="596" y1="176" x2="596" y2="160"/>
-        <!-- emitter: down-right with arrow -->
-        <line class="comp" x1="565" y1="224" x2="596" y2="244"/>
-        <polygon fill="var(--ink)" points="596,244 583,241 590,231"/>
-        <line class="comp" x1="596" y1="244" x2="596" y2="262"/>
-        <text class="lbl" x="628" y="216">Q1</text>
-        <text class="lbl-m" x="628" y="232">2N3904</text>
+        <!-- Q1 -->
+        <circle class="comp" cx="540" cy="220" r="40"/>
+        <line class="comp" x1="520" y1="194" x2="520" y2="246" stroke-width="3"/>
+        <line class="comp" x1="520" y1="206" x2="551" y2="186"/>
+        <line class="comp" x1="551" y1="186" x2="551" y2="170"/>
+        <line class="comp" x1="520" y1="234" x2="551" y2="254"/>
+        <line class="comp" x1="551" y1="254" x2="551" y2="272"/>
+        <text class="lbl" x="583" y="226">Q1</text>
+        <text class="lbl-m" x="583" y="242">2N3904</text>
+        <text class="lbl-m" x="448" y="318">stage 1 — clamp + invert</text>
 
-        <!-- collector node up to R2 and right to RX -->
-        <line class="sig" x1="596" y1="160" x2="596" y2="148"/>
-        <circle class="dot" cx="596" cy="148" r="4"/>
-        <line class="sig" x1="596" y1="148" x2="596" y2="136"/>
-        <!-- R2 vertical zigzag 596: y 136 -> 64 -->
-        <path class="railw" d="M596,136 l0,-6 l-11,-6 l22,-12 l-22,-12 l22,-12 l-22,-12 l11,-6 l0,-6"/>
-        <text class="lbl-r" x="616" y="104">R2 10kΩ</text>
-        <line class="railw" x1="596" y1="64" x2="596" y2="52"/>
-        <!-- 3.3V rail to ESP32 3V pin -->
-        <line class="railw" x1="596" y1="52" x2="596" y2="120"  visibility="hidden"/>
-        <path class="railw" d="M596,52 L780,52 L780,120 L812,120"/>
-        <text class="lbl-r" x="640" y="44">3.3V rail</text>
-        <!-- RX wire -->
-        <line class="sig" x1="596" y1="148" x2="700" y2="148"/>
-        <path class="sig" d="M700,148 L700,180 L812,180"/>
-        <text class="lbl-c" x="712" y="170">to RX</text>
+        <!-- Q1 collector node + R2 pull-up -->
+        <line class="sig" x1="551" y1="170" x2="551" y2="158"/>
+        <circle class="dot" cx="551" cy="158" r="4"/>
+        <line class="sig" x1="551" y1="158" x2="551" y2="146"/>
+        <path class="railw" d="M551,146 l0,-6 l-11,-6 l22,-12 l-22,-12 l22,-12 l-22,-12 l11,-6 l0,-6"/>
+        <text class="lbl-r" x="571" y="114">R2 10kΩ</text>
+        <line class="railw" x1="551" y1="74" x2="551" y2="52"/>
 
-        <!-- emitter to ground rail -->
-        <line class="gndw" x1="596" y1="262" x2="596" y2="332"/>
-        <circle class="dot" cx="596" cy="332" r="4"/>
+        <!-- Q1 collector -> R4 -> Q2 base -->
+        <line class="sig" x1="551" y1="158" x2="650" y2="158"/>
+        <line class="sig" x1="650" y1="158" x2="650" y2="220"/>
+        <path class="sig" d="M650,220 l8,0 l6,-11 l12,22 l12,-22 l12,22 l12,-22 l6,11 l8,0"/>
+        <text class="lbl" x="658" y="198">R4 10kΩ</text>
+        <line class="sig" x1="726" y1="220" x2="840" y2="220"/>
 
-        <!-- ground rail -->
-        <line class="gndw" x1="122" y1="332" x2="812" y2="332"/>
-        <text class="lbl-g" x="420" y="354">shared ground — car GND and board GND must be common</text>
+        <!-- Q2 -->
+        <circle class="comp" cx="860" cy="220" r="40"/>
+        <line class="comp" x1="840" y1="194" x2="840" y2="246" stroke-width="3"/>
+        <line class="comp" x1="840" y1="206" x2="891" y2="186"/>
+        <line class="comp" x1="891" y1="186" x2="891" y2="170"/>
+        <line class="comp" x1="840" y1="234" x2="891" y2="254"/>
+        <line class="comp" x1="891" y1="254" x2="891" y2="272"/>
+        <text class="lbl" x="903" y="226">Q2</text>
+        <text class="lbl-m" x="903" y="242">2N3904</text>
+        <text class="lbl-m" x="770" y="318">stage 2 — invert back</text>
+
+        <!-- Q2 collector node + R5 pull-up -->
+        <line class="sig" x1="891" y1="170" x2="891" y2="158"/>
+        <circle class="dot" cx="891" cy="158" r="4"/>
+        <line class="sig" x1="891" y1="158" x2="891" y2="146"/>
+        <path class="railw" d="M891,146 l0,-6 l-11,-6 l22,-12 l-22,-12 l22,-12 l-22,-12 l11,-6 l0,-6"/>
+        <text class="lbl-r" x="911" y="114">R5 10kΩ</text>
+        <line class="railw" x1="891" y1="74" x2="891" y2="52"/>
+
+        <!-- 3.3V rail -->
+        <path class="railw" d="M551,52 L1010,52 L1010,130 L1050,130"/>
+        <circle class="dot" cx="891" cy="52" r="4"/>
+        <text class="lbl-r" x="600" y="44">3.3V rail</text>
+
+        <!-- RX tap: Q2 collector only -->
+        <line class="sig" x1="891" y1="158" x2="980" y2="158"/>
+        <path class="sig" d="M980,158 L980,190 L1050,190"/>
+        <text class="lbl-c" x="946" y="182">to RX</text>
+
+        <!-- emitters to ground -->
+        <line class="gndw" x1="551" y1="272" x2="551" y2="342"/>
+        <circle class="dot" cx="551" cy="342" r="4"/>
+        <line class="gndw" x1="891" y1="272" x2="891" y2="342"/>
+        <circle class="dot" cx="891" cy="342" r="4"/>
+
+        <!-- shared ground -->
+        <line class="gndw" x1="122" y1="342" x2="1050" y2="342"/>
+        <text class="lbl-g" x="560" y="364">shared ground — car GND and board GND must be common</text>
       </svg>
     </div>
     <figcaption>The dashed line is the whole point: everything left of it may see car
     voltages; R1 limits base current so even a 12V transient is harmless, and the RX pin
     only ever sees 0–3.3V from its own pull-up. R3 keeps Q1 firmly off if the line ever
-    floats; the circuit works without it.</figcaption>
+    floats; the circuit works without it. <strong>RX is taken from Q2's collector
+    only</strong> — a wire left on Q1's collector is the classic slip when rebuilding
+    from the older one-stage version of this sheet.</figcaption>
   </figure>
 
-  <h2>What it does to the signal <span class="tag">clamp + invert</span></h2>
+  <h2>What it does to the signal <span class="tag">clamp, polarity preserved</span></h2>
   <figure>
     <div class="panel narrow">
-      <svg viewBox="0 0 720 190" role="img" aria-label="Two waveforms: the ALDL line idles high with short and long low pulses; the RX pin shows the same pulses inverted, idling low.">
+      <svg viewBox="0 0 720 190" role="img" aria-label="Two waveforms: the ALDL line idles high with short and long low pulses; the RX pin shows the same shape, idling high, because the two-stage input preserves polarity.">
         <text class="lbl-a" x="16" y="24">ALDL PIN E</text>
         <text class="lbl-m" x="130" y="24">idles high · pulses low</text>
         <line class="gridline" x1="16" y1="36" x2="704" y2="36"/>
@@ -299,16 +327,41 @@
         <text class="lbl-m" x="330" y="96">long = 1</text>
 
         <text class="lbl-c" x="16" y="130">ESP32 RX</text>
-        <text class="lbl-m" x="110" y="130">same pulses, flipped — what the PL2303 cable also does</text>
+        <text class="lbl-m" x="110" y="130">same shape, not flipped — RX must idle high, like the line</text>
         <line class="gridline" x1="16" y1="142" x2="704" y2="142"/>
         <line class="gridline" x1="16" y1="182" x2="704" y2="182"/>
-        <path class="wave-out" d="M16,182 L120,182 L120,142 L150,142 L150,182 L300,182 L300,142 L420,142 L420,182 L560,182 L560,142 L590,142 L590,182 L704,182"/>
+        <path class="wave-out" d="M16,142 L120,142 L120,182 L150,182 L150,142 L300,142 L300,182 L420,182 L420,142 L560,142 L560,182 L590,182 L590,142 L704,142"/>
+        <text class="lbl-m" x="112" y="200">→ 0xFE</text>
+        <text class="lbl-m" x="330" y="200">→ 0x00</text>
       </svg>
     </div>
-    <figcaption>Line high → Q1 on → RX pulled low. Line pulsed low → Q1 off → R2 pulls RX
-    to 3.3V. Q1 switches at ~0.7V on the base, well inside the line's swing. If a build
-    ever comes out non-inverted, it's a flag, not a fault: <code>goaldl -tcp &lt;addr&gt; -invert</code>.</figcaption>
+    <figcaption>Line high → Q1 on → its collector low → Q2 off → R5 pulls RX to 3.3V.
+    Line pulsed low → the chain flips → RX goes low. Two inversions cancel, so RX tracks
+    pin E. That is what a UART needs: it idles high and treats each falling edge as a
+    start bit, so a short pulse frames as <code>0xFE</code> and a long one as
+    <code>0x00</code>.</figcaption>
   </figure>
+
+  <h2>If it won't sync <span class="tag">check the byte mix first</span></h2>
+  <p class="lede" style="margin-bottom: 1rem;">A single inverting stage holds RX <em>low</em>
+  between pulses. The UART reads that as a continuous break: it emits <code>0x00</code>
+  forever, never sees a real start bit, and never syncs. The fault is invisible in the
+  circuit and obvious in the data — so histogram a capture before touching a wire.</p>
+  <table>
+    <thead>
+      <tr><th>Capture</th><th><code>0xFE</code></th><th><code>0x00</code></th><th>Verdict</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="part">idle_4800.raw</td><td>69.4%</td><td>30.5%</td><td>healthy reference</td></tr>
+      <tr><td class="part">this bridge, 2026-08-30</td><td>70.7%</td><td>29.2%</td><td>healthy — two stages</td></tr>
+      <tr><td class="part">one inverting stage</td><td>0%</td><td>99.7%</td><td>backwards polarity</td></tr>
+    </tbody>
+  </table>
+  <p class="callout"><strong><code>-invert</code> will not rescue this.</strong> Those
+  <code>0x00</code>s are framing artifacts, not inverted data — there is no signal in them
+  to flip, and neither is 2400 baud a workaround. Grab a minute with
+  <code>goaldl monitor -tcp &lt;addr&gt; -o out.raw</code> and count the bytes; if
+  <code>0xFE</code> is missing entirely, add the second stage.</p>
 
   <h2>Where the two wires come from <span class="tag">12-pin ALDL connector</span></h2>
   <figure>
@@ -376,7 +429,8 @@
     <figcaption>A 3.3V USB-TTL adapter's TX is already clean logic — wire it straight to
     RX. This exercises the real <code>busio.UART</code> path (<code>BRIDGE_TEST = "0"</code>)
     and should reproduce the 635/635 drive-capture frames over WiFi before the car is
-    involved. If the adapter is 5V-only, put the Q1 stage above inline.</figcaption>
+    involved. If the adapter is 5V-only, put the two-stage clamp above inline (both stages — one
+    alone inverts and will not sync).</figcaption>
   </figure>
 
   <h2>Parts <span class="tag">junk-drawer tier</span></h2>
@@ -385,9 +439,12 @@
       <tr><th>Part</th><th>Value</th><th>Job</th></tr>
     </thead>
     <tbody>
-      <tr><td class="part">Q1</td><td>2N3904 (or 2N2222, BC547 — any small NPN)</td><td>Clamps the car domain off the RX pin and inverts, switching at ~0.7V</td></tr>
+      <tr><td class="part">Q1</td><td>2N3904 (or 2N2222, BC547 — any small NPN)</td><td>Clamps the car domain off the board, switching at ~0.7V. Inverts as a side effect</td></tr>
+      <tr><td class="part">Q2</td><td>2N3904, same part</td><td>Inverts back, so RX follows pin E. <strong>Check the marking</strong> — a 2N3906 is a PNP in an identical package and will not switch here</td></tr>
       <tr><td class="part">R1</td><td>10kΩ</td><td>Limits base current — makes 12V+ transients on the line a non-event</td></tr>
-      <tr><td class="part">R2</td><td>10kΩ</td><td>Pulls RX to 3.3V when Q1 is off (take 3.3V from the QT Py's 3V pin)</td></tr>
+      <tr><td class="part">R2</td><td>10kΩ</td><td>Pulls Q1's collector to 3.3V when Q1 is off (take 3.3V from the QT Py's 3V pin)</td></tr>
+      <tr><td class="part">R4</td><td>10kΩ</td><td>Feeds Q1's collector into Q2's base</td></tr>
+      <tr><td class="part">R5</td><td>10kΩ</td><td>Pulls RX to 3.3V when Q2 is off</td></tr>
       <tr><td class="part">R3</td><td>100kΩ, optional</td><td>Keeps Q1 off against noise if the line floats</td></tr>
       <tr><td class="part">—</td><td>Hookup wire, heat-shrink</td><td>Strain relief matters more than the electronics here</td></tr>
     </tbody>
@@ -397,7 +454,11 @@
     <li>Power in the car: 12V accessory → any USB adapter → the QT Py's USB-C. USB carries
     power only in the deployed setup; data leaves over WiFi.</li>
     <li>Optocoupler alternative (PC817 + ~1kΩ LED resistor) buys full galvanic isolation
-    for a couple more parts — same inverting behavior, same three board pins.</li>
+    for a couple more parts — but an opto inverts, so it replaces stage 1 and still needs
+    stage 2 behind it. Same three board pins either way.</li>
+    <li>An ESP32 can invert RX in UART hardware (<code>UART_RXD_INV</code>), which would
+    make one stage sufficient — but CircuitPython's <code>busio.UART</code> does not
+    expose it, so this build re-inverts in hardware instead.</li>
     <li>The bridge firmware needs no change for any of this: it reads RX at 4800 baud and
     forwards bytes verbatim, warts and all.</li>
   </ul>
@@ -413,7 +474,7 @@
     </thead>
     <tbody>
       <tr><td class="part">Signal</td><td>one-way PWM broadcast</td><td>half-duplex UART, request/response</td></tr>
-      <tr><td class="part">Input stage</td><td>inverting NPN clamp (above)</td><td>non-inverting clamp, or invert RX in the S3's UART hardware</td></tr>
+      <tr><td class="part">Input stage</td><td>two-NPN non-inverting clamp (above)</td><td>one NPN stage — an 8192 line is inverted relative to pin E</td></tr>
       <tr><td class="part">TX path</td><td>none — receive-only</td><td>one open-collector NPN driving the line</td></tr>
       <tr><td class="part">Hardware delta</td><td>—</td><td>~two more transistors + resistors on the same connector</td></tr>
       <tr><td class="part">Software</td><td>shipped (goaldl decoder + TCPProvider)</td><td>a real future feature: second decode path, mode-request protocol, per-ECM tables</td></tr>
