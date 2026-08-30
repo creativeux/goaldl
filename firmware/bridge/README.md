@@ -10,6 +10,11 @@ frame sync itself.
 - `code.py` — the firmware. Copy to the board's `CIRCUITPY` drive.
 - `settings.toml` — configuration **template** (safe defaults, no secrets). Copy to the
   drive and edit there; WiFi credentials live only on the board, never in this repo.
+- `bench.py` — bench/diagnostic tool, not part of the firmware. Copy it alongside
+  `code.py` and run `import bench` from the REPL: it prints the raw logic level on the
+  UART RX pin twice a second. Statically verifies the input-conditioning stage with no
+  signal source, and answers "is RX even toggling?" first thing in the car. Only one of
+  `bench.py` / `code.py` can own `board.RX` at a time.
 
 ## Configuration (`settings.toml` on the board)
 
@@ -42,10 +47,22 @@ default in the car), where the bridge *is* the network.
   join retries in a loop (red/yellow blink + console message on failure) instead of
   halting on a wrong password or out-of-range network; `TestSource.read(n)` honors the
   caller's byte cap. Code-reviewed; on-board smoke re-run pending next replug.
+- **2026-08-29 — input-conditioning stage proven statically** (no adapter, no car): the
+  NPN stage below, built on a breadboard; `bench.py` reads `board.RX` while the stage
+  input (the ALDL-pin-E side of R1) is jumpered to 3V and to GND in turn. Measured
+  `3V → RX LOW`, `GND → RX HIGH`, `floating → RX HIGH` — clamp + invert confirmed, and
+  with it Q1's orientation, the emitter ground, and the R1/R2/R3 placements. **Not**
+  covered: switching speed (static levels only — though a 2N3904 switches in well under
+  1 µs against a 6250 µs bit cell) and the 12V clamp itself (nothing exceeded 3.3V).
 - **Pending — real-UART bench leg**: `BRIDGE_TEST=0`, a 3.3V USB-TTL adapter replays
   `pkg/decoder/testdata/drive_4800.raw` at 4800 baud into the RX pin (TX→RX, GND→GND);
   expect 635/635 frames over WiFi.
-- **Pending — car leg**: input-conditioning stage (below) on ALDL pins E/A.
+- **Pending — conditioning stage under real traffic**: the same USB-TTL replay, but
+  routed *through* the Q1 stage into the ALDL-pin-E input rather than straight to RX
+  (add `-invert` on the goaldl side). Closes the switching-speed question the static
+  test leaves open.
+- **Pending — car leg**: the stage on ALDL pins E/A, off a 12-pin pigtail, on perfboard
+  rather than a breadboard.
 
 ## Input conditioning (car wiring)
 
