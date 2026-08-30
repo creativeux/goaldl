@@ -86,20 +86,37 @@ clamp that domain away from the pin **while preserving polarity** — see the po
 note below, it is the part that is easy to get wrong. Two NPN stages in series: the
 first clamps and inverts, the second inverts back.
 
-```
-ALDL pin E ── R1 10kΩ ──┬── base  Q1 2N3904        ── R4 10kΩ ──┬── base  Q2 2N3904
-                        │                                       │
-             (optional R3 100kΩ base→GND)
+Each stage is three nodes — base, collector, emitter — drawn one stage at a time so
+every connection is explicit:
 
-QT Py 3V ─── R2 10kΩ ───┬── Q1 collector           QT Py 3V ─── R5 10kΩ ───┬── QT Py RX
-                        │   (drives R4)                                 collector
-                     emitter                                             emitter
-                        │                                                   │
-ALDL pin A ─────────────┴───────────────────────────────────────────────────┴── QT Py GND
+```
+STAGE 1 — clamps the car's domain off the board, and inverts
+
+  ALDL pin E ──[R1 10kΩ]──┬─────────────── Q1 base
+                          └──[R3 100kΩ]─── GND            (optional)
+
+  QT Py 3V ────[R2 10kΩ]──┬─────────────── Q1 collector
+                          └─────────────── into stage 2 ──┐
+                                                          │
+                                           Q1 emitter ─── GND
+
+STAGE 2 — inverts back, so RX ends up following pin E     │
+                                                          │
+  stage 1 out ─[R4 10kΩ]──┬─────────────── Q2 base ◄──────┘
+
+  QT Py 3V ────[R5 10kΩ]──┬─────────────── Q2 collector
+                          └─────────────── QT Py RX
+
+                                           Q2 emitter ─── GND
+
+  ALDL pin A ───────────────────────────── QT Py GND   (shared, required)
 ```
 
 - **Stage 1**: line high → Q1 on → its collector low. Line pulsed low → Q1 off → R2
-  pulls the collector to 3.3V. Switches at ~0.7V; R1 makes 12V+ transients a non-event.
+  pulls the collector to 3.3V. Switches at ~0.7V; R1 limits base current, so a *positive*
+  12V transient forward-clamps harmlessly through the base-emitter junction. A *negative*
+  spike is not covered — Q1's V(EBO) is only ~6V — so add a base-to-ground diode if the
+  install sees a dirty line (`docs/mobile-ui.md` makes the same point).
 - **Stage 2**: repeats the inversion, so RX ends up following pin E directly — idle
   high, pulsing low, which is what a UART needs.
 - **RX comes off Q2's collector only.** Nothing connects Q1's collector to RX; that is
@@ -124,10 +141,16 @@ the bytes are framing artifacts, not inverted data, so there is nothing to flip:
 **Check the byte mix before anything else** when a build won't sync. `monitor -o` a
 minute of raw bytes and histogram it; the answer is immediate and needs no hardware.
 
-An earlier revision of this file specified a single inverting stage, on the mistaken
-premise that the PL2303 cable inverts. It does not — it clamps and level-shifts with
-the polarity preserved. `docs/mobile-ui.md` had this right all along ("Polarity is
-already UART-shaped at logic level ... no inversion needed").
+What the byte values actually pin down is that there is **no net inversion** between
+pin E and the UART's RX input. How a given cable achieves that is its own business: the
+classic ALDL cables contain one inverting transistor stage because they fed RS-232
+receivers, which invert again — two inversions, net non-inverting, the same result this
+two-NPN stage reaches. **A stage that inverts must be paired with a receiver that
+inverts back.** An RS-232 line receiver does; a TTL UART pin like the QT Py's does not,
+which is why this build needs stage 2. An earlier revision of this file specified a
+single inverting stage feeding a TTL pin, which is the combination that cannot work.
+`docs/mobile-ui.md` had it right all along ("Polarity is already UART-shaped at logic
+level ... no inversion needed").
 
 - Optocoupler alternative (PC817 + ~1kΩ) buys galvanic isolation — but an opto inverts,
   so it replaces stage 1 and still needs stage 2 (or an ESP32 with `UART_RXD_INV`
@@ -166,7 +189,7 @@ the generations differ in signal, not connector:
 | Connector | same 12-pin shell | same 12-pin shell |
 | Data pin | E | M |
 | Signal | one-way PWM broadcast | half-duplex UART, request/response |
-| Input stage | two-NPN non-inverting clamp (above) | same clamp, one stage (an 8192 line is inverted relative to E) |
+| Input stage | two-NPN non-inverting clamp (above) | the same clamp — net non-inverting, however it is built |
 | TX path | none needed | one open-collector NPN driving the line |
 | ESP32 side | UART0 RX @ 4800 (the UART-sampling trick) | second UART @ 8192 (S3 has 3) |
 

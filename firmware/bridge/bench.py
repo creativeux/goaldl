@@ -21,10 +21,16 @@
 #
 #   2. First diagnostic in the car: if goaldl decodes nothing, this answers
 #      "is the RX pin even toggling?" before anyone suspects the decoder.
-#      A live ALDL line makes it flicker constantly.
+#      Expect MOSTLY HIGH with an occasional LOW -- the line's low duty cycle
+#      is only ~13% (189 bits per 1.18 s frame, each 6250 us cell carrying a
+#      365 or 1875 us low pulse), and this samples asynchronously at 2 Hz, so
+#      roughly one print in eight lands inside a pulse. Watch 20-30 samples:
+#      all HIGH across that span means nothing is arriving.
 #
 # code.py owns board.RX as a UART, so only one of the two can run at a time.
-# Ctrl-C out (or reset) before letting code.py take the pin back.
+# The finally: below releases the pin on Ctrl-C, so code.py can reclaim it --
+# without that, a DigitalInOut left holding board.RX makes the next
+# busio.UART() raise "RX in use" until a soft reboot.
 
 import time
 
@@ -35,6 +41,9 @@ pin = digitalio.DigitalInOut(board.RX)
 pin.direction = digitalio.Direction.INPUT
 
 print("bench: reading board.RX -- Ctrl-C to stop")
-while True:
-    print("RX =", "HIGH" if pin.value else "LOW")
-    time.sleep(0.5)
+try:
+    while True:
+        print("RX =", "HIGH" if pin.value else "LOW")
+        time.sleep(0.5)
+finally:
+    pin.deinit()

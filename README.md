@@ -23,7 +23,8 @@ operating range.
   ~1986–1993 GM TBI trucks/vans, 4.3/5.0/5.7 L). The broader 1980–1995 GM ALDL
   range — other 160-baud ECMs and the 8192-baud generation — is on the roadmap;
   see the [vehicle support matrix](docs/vehicle-support.md).
-- **A USB-to-ALDL cable** — an inverting adapter onto the ECM's data line. A
+- **A USB-to-ALDL cable** — a level-shifting adapter onto the ECM's data line,
+  applying no net inversion (RX idles high, like the line). A
   Prolific PL2303 or a genuine FTDI FT232R both work. See
   [Platform support](#platform-support) for the driver each OS needs.
 

@@ -8,7 +8,8 @@ so keep OS-conditional code confined to those seams.
 
 Audited 2026-07-06: `go build ./...` verified clean for darwin/amd64+arm64,
 linux/amd64+arm64+arm+riscv64, windows/amd64+arm64, freebsd/amd64, and
-openbsd/amd64. Hardware assumption throughout: an inverting USB-to-ALDL cable
+openbsd/amd64. Hardware assumption throughout: a level-shifting USB-to-ALDL cable
+(no net inversion at the UART pin)
 on a PL2303 (tested) or FTDI FT232R (fallback) adapter.
 
 ## Tier 1 — Core (built, tested, supported)

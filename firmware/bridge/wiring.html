@@ -191,8 +191,9 @@
     <p class="eyebrow">goaldl · bridge hardware · stage 2</p>
     <h1>ALDL → ESP32 input conditioning</h1>
     <p class="lede">Two transistors stand between the car's 12V-domain data line and the
-    QT Py's 3.3V-only RX pin. It clamps the voltage <em>and</em> inverts the signal — the
-    same two jobs the PL2303 cable's internal circuit does today, so the bytes come out
+    QT Py's 3.3V-only RX pin. Together they clamp the car's voltage away from the pin
+    while leaving the signal's polarity <em>unchanged</em> — the first stage inverts, the
+    second inverts back — so RX idles high and follows pin E, and the bytes come out
     identical to a serial capture.</p>
   </header>
 
@@ -245,6 +246,7 @@
         <line class="comp" x1="520" y1="206" x2="551" y2="186"/>
         <line class="comp" x1="551" y1="186" x2="551" y2="170"/>
         <line class="comp" x1="520" y1="234" x2="551" y2="254"/>
+        <polygon fill="var(--ink)" points="551,254 538,251 545,241"/>
         <line class="comp" x1="551" y1="254" x2="551" y2="272"/>
         <text class="lbl" x="583" y="226">Q1</text>
         <text class="lbl-m" x="583" y="242">2N3904</text>
@@ -271,6 +273,7 @@
         <line class="comp" x1="840" y1="206" x2="891" y2="186"/>
         <line class="comp" x1="891" y1="186" x2="891" y2="170"/>
         <line class="comp" x1="840" y1="234" x2="891" y2="254"/>
+        <polygon fill="var(--ink)" points="891,254 878,251 885,241"/>
         <line class="comp" x1="891" y1="254" x2="891" y2="272"/>
         <text class="lbl" x="903" y="226">Q2</text>
         <text class="lbl-m" x="903" y="242">2N3904</text>
@@ -316,7 +319,7 @@
   <h2>What it does to the signal <span class="tag">clamp, polarity preserved</span></h2>
   <figure>
     <div class="panel narrow">
-      <svg viewBox="0 0 720 190" role="img" aria-label="Two waveforms: the ALDL line idles high with short and long low pulses; the RX pin shows the same shape, idling high, because the two-stage input preserves polarity.">
+      <svg viewBox="0 0 720 212" role="img" aria-label="Two waveforms: the ALDL line idles high with short and long low pulses; the RX pin shows the same shape, idling high, because the two-stage input preserves polarity.">
         <text class="lbl-a" x="16" y="24">ALDL PIN E</text>
         <text class="lbl-m" x="130" y="24">idles high · pulses low</text>
         <line class="gridline" x1="16" y1="36" x2="704" y2="36"/>
@@ -474,7 +477,7 @@
     </thead>
     <tbody>
       <tr><td class="part">Signal</td><td>one-way PWM broadcast</td><td>half-duplex UART, request/response</td></tr>
-      <tr><td class="part">Input stage</td><td>two-NPN non-inverting clamp (above)</td><td>one NPN stage — an 8192 line is inverted relative to pin E</td></tr>
+      <tr><td class="part">Input stage</td><td>two-NPN non-inverting clamp (above)</td><td>the same clamp — net non-inverting, however it is built</td></tr>
       <tr><td class="part">TX path</td><td>none — receive-only</td><td>one open-collector NPN driving the line</td></tr>
       <tr><td class="part">Hardware delta</td><td>—</td><td>~two more transistors + resistors on the same connector</td></tr>
       <tr><td class="part">Software</td><td>shipped (goaldl decoder + TCPProvider)</td><td>a real future feature: second decode path, mode-request protocol, per-ECM tables</td></tr>
