@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/creativeux/goaldl/compare/v0.1.3...v0.1.4) (2026-08-30)
+
+
+### Bug Fixes
+
+* ALDL input stage polarity — two-NPN clamp, verified on a running engine ([#44](https://github.com/creativeux/goaldl/issues/44)) ([4bebc4e](https://github.com/creativeux/goaldl/commit/4bebc4eb1214f9ad37ab3a64056c3e6f53cc34cf))
+
 ## [0.1.3](https://github.com/creativeux/goaldl/compare/v0.1.2...v0.1.3) (2026-07-19)
 
 
